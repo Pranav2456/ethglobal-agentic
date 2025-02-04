@@ -1,0 +1,30 @@
+{
+  "name": "defai-agent",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "NODE_OPTIONS='--no-warnings' ts-node ./agent.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@coinbase/agentkit": "^0.1.1",
+    "@coinbase/agentkit-langchain": "^0.1.0",
+    "@coinbase/cdp-langchain": "^0.0.15",
+    "@langchain/core": "^0.3.37",
+    "@langchain/langgraph": "^0.2.44",
+    "@langchain/openai": "^0.4.2",
+    "@morpho-org/blue-sdk": "^2.3.0",
+    "@morpho-org/blue-sdk-ethers": "^2.2.1",
+    "@morpho-org/morpho-ts": "^2.0.1",
+    "ethers": "^6.13.5",
+    "ts-node": "^10.9.2",
+    "viem": "^2.22.21"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  }
+}

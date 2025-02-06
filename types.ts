@@ -1,5 +1,6 @@
 // src/types.ts
 import { WalletData } from "@coinbase/coinbase-sdk";
+import { type Address } from 'viem';
 
 export interface StoredWalletData {
     userId: string;
@@ -20,36 +21,47 @@ export interface MarketAnalysis {
     lltv: number;
 }
 
-export interface TransactionResult {
+export interface SimulationResult {
     success: boolean;
-    action?: string;
-    marketId?: string;
-    amount?: string;
-    transactionHash?: string;
+    gasEstimate?: bigint;
+    data?: `0x${string}`;
     error?: string;
+}
+
+export interface TransactionRequest {
+    action: 'supply' | 'withdraw';
+    marketId: string;
+    token: Address;
+    amount: bigint;
+    shares?: bigint;
+}
+
+export interface StrategySimulation {
+    approval?: SimulationResult;
+    transaction: SimulationResult;
 }
 
 export interface RiskMetrics {
     isHealthy: boolean;
     utilizationRisk: {
-      current: number;
-      status: 'HIGH' | 'MEDIUM' | 'LOW';
+        current: number;
+        status: 'HIGH' | 'MEDIUM' | 'LOW';
     }
 }
-  
+
 export interface MarketResult {
     timestamp: string;
     market: string;
     data: {
-      supplyAPY: number;
-      borrowAPY: number;
-      utilization: number;
-      totalSupplyAssets: string;
-      totalBorrowAssets: string;
-      liquidity: string;
-      lltv: number;
-      collateralToken: string;
-      loanToken: string;
+        supplyAPY: number;
+        borrowAPY: number;
+        utilization: number;
+        totalSupplyAssets: string;
+        totalBorrowAssets: string;
+        liquidity: string;
+        lltv: number;
+        collateralToken: Address;
+        loanToken: Address;
     };
     riskMetrics: RiskMetrics;
 }

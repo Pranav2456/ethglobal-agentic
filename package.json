@@ -19,6 +19,7 @@
     "@langchain/openai": "^0.4.2",
     "@morpho-org/blue-sdk": "^2.3.0",
     "@morpho-org/blue-sdk-ethers": "^2.2.1",
+    "@morpho-org/blue-sdk-viem": "^2.2.1",
     "@morpho-org/morpho-ts": "^2.0.1",
     "ethers": "^6.13.5",
     "ts-node": "^10.9.2",

@@ -43,10 +43,21 @@ export class WalletManager {
     }
 
     async createUserWallet(userId: string): Promise<string> {
+        if (!userId || typeof userId !== 'string') {
+            throw new Error('Invalid user ID provided');
+        }
+
         try {
-            // Check if wallet exists
-            if (this.wallets.has(userId)) {
-                return this.wallets.get(userId)!.address;
+            // Add validation for existing wallet
+            const existing = this.wallets.get(userId);
+            if (existing) {
+                // Verify wallet is still valid
+                const provider = await this.getWallet(userId);
+                if (provider) {
+                    return existing.address;
+                }
+                // If not valid, remove it
+                this.wallets.delete(userId);
             }
 
             // Create new wallet with CDP
@@ -68,8 +79,9 @@ export class WalletManager {
 
             return storedData.address;
         } catch (error) {
+            // Improved error handling
             if (error instanceof TimeoutError) {
-                console.error("Wallet creation timed out");
+                throw new Error(`Wallet creation timed out for user ${userId}`);
             }
             throw error;
         }

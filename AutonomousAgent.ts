@@ -15,6 +15,15 @@ import { morphoActionProvider } from "./actions/morphoProvider";
 import { CONFIG } from "./config";
 import readline from "readline";
 
+interface AutomatedCheckResult {
+  timestamp: string;
+  walletAddress: string;
+  currentPosition?: any;
+  recommendedAction?: string;
+  simulation?: any;
+  error?: string;
+}
+
 export class AutonomousAgent {
   private walletManager: WalletManager;
   private agentKit: AgentKit | null;
@@ -220,53 +229,105 @@ Available Commands:
         return;
     }
 
+    const results: AutomatedCheckResult[] = [];
+
     try {
         const wallets = this.walletManager.getAllWallets();
         console.log(`Checking ${wallets.length} wallets for optimization`);
 
         for (const [userId, walletData] of wallets) {
-            const walletProvider = await this.walletManager.getWallet(userId);
-            if (!walletProvider) {
-                console.error(`Failed to get wallet provider for user ${userId}`);
-                continue;
-            }
+            const result: AutomatedCheckResult = {
+                timestamp: new Date().toISOString(),
+                walletAddress: walletData.address
+            };
 
-            console.log(`Analyzing markets for wallet ${walletData.address}`);
+            try {
+                // 1. First check if wallet has any funds
+                const balanceCheck = await this.handleUserCommand('balance', userId);
+                const balances = JSON.parse(balanceCheck);
+                
+                const hasStablecoins = balances.some((b: any) => 
+                    b.token === 'USDC' && BigInt(b.balance) > BigInt(0)
+                );
 
-            // Add configuration object with thread_id
-            const stream = await this.agent.stream(
-                {
-                    messages: [
-                        new HumanMessage(`
-                            Analyze Morpho markets for wallet ${walletData.address}:
-                            1. Get current position and APY
-                            2. Compare with all market APYs
-                            3. Calculate potential gains after gas
-                            4. Execute if profitable
-                            Current timestamp: ${Date.now()}
-                        `),
-                    ],
-                },
-                {
-                    configurable: {
-                        thread_id: `${userId}-${Date.now()}`
+                if (!hasStablecoins) {
+                    result.error = 'No stablecoin balance found';
+                    results.push(result);
+                    continue;
+                }
+
+                // 2. Get current position
+                const positionCheck = await this.handleUserCommand('analyze position', userId);
+                result.currentPosition = JSON.parse(positionCheck);
+
+                // 3. Analyze markets for better yields
+                const marketAnalysis = await this.handleUserCommand('analyze markets', userId);
+                const markets = JSON.parse(marketAnalysis);
+
+                // 4. Find best opportunity
+                const currentAPY = result.currentPosition?.marketData?.supplyAPY || 0;
+                const bestMarket = markets.reduce((best: any, market: any) => {
+                    if (market.data.supplyAPY > best.data.supplyAPY && 
+                        market.riskMetrics.isHealthy && 
+                        market.riskMetrics.utilizationRisk.status !== 'HIGH') {
+                        return market;
                     }
-                }
-            );
+                    return best;
+                }, { data: { supplyAPY: currentAPY } });
 
-            for await (const chunk of stream) {
-                if ("tools" in chunk) {
-                    console.log(`Action for wallet ${walletData.address}:`, {
-                        timestamp: new Date().toISOString(),
-                        action: chunk.tools.messages[0].content,
-                    });
+                // 5. Check if rebalancing is worth it
+                if (bestMarket.data.supplyAPY > currentAPY + CONFIG.YIELD_MANAGER.minimumAPYDifference) {
+                    // Simulate the rebalancing
+                    const simulation = await this.simulateRebalancing(userId, result.currentPosition, bestMarket);
+                    result.simulation = simulation;
+                    result.recommendedAction = `Rebalance to ${bestMarket.market} for +${(bestMarket.data.supplyAPY - currentAPY).toFixed(2)}% APY`;
                 }
+
+            } catch (error: any) {
+                result.error = `Error processing wallet ${walletData.address}: ${error.message}`;
             }
+
+            results.push(result);
+            console.log(`Completed check for wallet ${walletData.address}`);
         }
-    } catch (error) {
+
+        // Log results
+        console.log('\nAutomated Check Results:', JSON.stringify(results, null, 2));
+        return results;
+
+    } catch (error: any) {
         console.error("Error in optimization cycle:", error);
+        throw error;
     }
 }
+
+private async simulateRebalancing(
+    userId: string,
+    currentPosition: any,
+    targetMarket: any
+): Promise<any> {
+    try {
+        // 1. Simulate withdrawal from current position
+        const withdrawSimulation = await this.handleUserCommand(
+            `withdraw ${currentPosition.marketId} ${currentPosition.position.supplyAssets}`,
+            userId
+        );
+
+        // 2. Simulate supply to new market
+        const supplySimulation = await this.handleUserCommand(
+            `supply ${targetMarket.marketId} ${currentPosition.position.supplyAssets}`,
+            userId
+        );
+
+        return {
+            withdraw: JSON.parse(withdrawSimulation),
+            supply: JSON.parse(supplySimulation)
+        };
+    } catch (error: any) {
+        throw new Error(`Rebalancing simulation failed: ${error.message}`);
+    }
+}
+
   private automatedCheckInterval: NodeJS.Timeout | null = null;
 
   async start() {

@@ -6,16 +6,22 @@ import chalk from 'chalk';
 
 export class AgentInterface extends EventEmitter {
     private agent: AutonomousAgent;
-    private rl: readline.Interface;
+    private rl?: readline.Interface;
     private isActive: boolean = false;
+    private isCLIMode: boolean = false;
 
-    constructor(agent: AutonomousAgent) {
+    constructor(agent: AutonomousAgent, cliMode: boolean = false) {
         super();
         this.agent = agent;
-        this.rl = readline.createInterface({
-            input: process.stdin,
-            output: process.stdout
-        });
+        this.isCLIMode = cliMode;
+        
+        // Only set up readline if in CLI mode
+        if (cliMode) {
+            this.rl = readline.createInterface({
+                input: process.stdin,
+                output: process.stdout
+            });
+        }
 
         // Set up agent event listeners
         this.setupEventListeners();
@@ -111,15 +117,11 @@ export class AgentInterface extends EventEmitter {
         try {
             this.isActive = true;
             await this.agent.start();
-            this.displayWelcomeMessage();
-
-            // Start input loop
-            while (this.isActive) {
-                const input = await new Promise<string>(resolve => {
-                    this.rl.question(chalk.green('\n> '), resolve);
-                });
-
-                await this.processUserInput(input);
+            
+            // Only show welcome message and start input loop in CLI mode
+            if (this.isCLIMode) {
+                this.displayWelcomeMessage();
+                await this.startInputLoop();
             }
         } catch (error: any) {
             this.displayMessage('error', `Fatal error: ${error.message}`);
@@ -127,11 +129,39 @@ export class AgentInterface extends EventEmitter {
         }
     }
 
+    private async startInputLoop() {
+        while (this.isActive && this.rl) {
+            const input = await new Promise<string>(resolve => {
+                this.rl!.question(chalk.green('\n> '), resolve);
+            });
+
+            await this.processUserInput(input);
+        }
+    }
+
     public async stop() {
         this.isActive = false;
         await this.agent.stop();
-        this.rl.close();
+        if (this.rl) {
+            this.rl.close();
+        }
         this.displayMessage('system', 'Agent stopped. Goodbye!');
         process.exit(0);
+    }
+
+    public async processMessage(message: string): Promise<string> {
+        try {
+            this.displayMessage('user', message);
+            const response = await this.agent.processUserMessage(message);
+            
+            // Filter out raw JSON if present
+            const cleanResponse = response.replace(/^\[.*\]\s*/s, '');
+            
+            this.displayMessage('agent', cleanResponse);
+            return cleanResponse;
+        } catch (error: any) {
+            console.error('Error processing message:', error);
+            throw new Error(error.message || 'Failed to process message');
+        }
     }
 }

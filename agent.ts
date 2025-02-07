@@ -31,7 +31,7 @@ async function setupAgent() {
 
         // Create agent and interface
         const agent = new AutonomousAgent();
-        const agentInterface = new AgentInterface(agent);
+        const agentInterface = new AgentInterface(agent, false);
 
         return agentInterface;
     } catch (error: any) {
@@ -83,4 +83,4 @@ if (require.main === module) {
 }
 
 // Export for testing and module usage
-export { setupAgent, startAgent };
+export { setupAgent, startAgent, setupProcessHandlers };

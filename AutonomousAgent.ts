@@ -7,387 +7,580 @@ import {
 } from "@coinbase/agentkit";
 import { getLangChainTools } from "@coinbase/agentkit-langchain";
 import { ChatOpenAI } from "@langchain/openai";
-import { HumanMessage } from "@langchain/core/messages";
+import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { createReactAgent } from "@langchain/langgraph/prebuilt";
 import { MemorySaver } from "@langchain/langgraph";
 import { WalletManager } from "./services/WalletManager";
-import { morphoActionProvider } from "./actions/morphoProvider";
+import { morphoProvider } from "./actions/morphoProvider";
 import { CONFIG } from "./config";
-import readline from "readline";
+import { WalletStatus, DepositStatus, MarketAnalysis, OptimizationResult } from "./agent.types"
+import EventEmitter from "events";
 
-interface AutomatedCheckResult {
-  timestamp: string;
-  walletAddress: string;
-  currentPosition?: any;
-  recommendedAction?: string;
-  simulation?: any;
-  error?: string;
-}
-
-export class AutonomousAgent {
+export class AutonomousAgent extends EventEmitter {
   private walletManager: WalletManager;
-  private agentKit: AgentKit | null;
+  private agentKit: AgentKit | null = null;
   private agent: any;
-  private isRunning: boolean;
-  private rl: readline.Interface;
+  private isRunning: boolean = false;
+  private currentThread: string | null = null;
+  private memory: MemorySaver;
+  private monitoringInterval?: NodeJS.Timeout;
+  private optimizationInterval?: NodeJS.Timeout;
+  private depositMonitoringIntervals: Map<string, NodeJS.Timeout> = new Map();
+  private lastKnownBalances: Map<string, string> = new Map();
+  private marketCache: Map<string, { data: MarketAnalysis; timestamp: number }> = new Map();
+  private readonly MARKET_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
   constructor() {
-    this.walletManager = new WalletManager();
-    this.agentKit = null;
-    this.isRunning = false;
-    this.rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
+      super();
+      this.walletManager = new WalletManager();
+      this.memory = new MemorySaver();
   }
 
   async initialize() {
-    try {
-      // Initialize base CDP wallet provider
-      const walletProvider = await CdpWalletProvider.configureWithWallet({
-        apiKeyName: process.env.CDP_API_KEY_NAME!,
-        apiKeyPrivateKey: process.env.CDP_API_KEY_PRIVATE_KEY!.replace(
-          /\\n/g,
-          "\n"
-        ),
-        networkId: "base-mainnet",
-      });
+      try {
+          const llm = new ChatOpenAI({
+              modelName: "gpt-4-turbo-preview",
+              temperature: 0.7,
+          });
 
-      // Initialize AgentKit with all required providers
-      this.agentKit = await AgentKit.from({
-        walletProvider,
-        actionProviders: [
-          walletActionProvider(),
-          erc20ActionProvider(),
-          cdpApiActionProvider({
-            apiKeyName: process.env.CDP_API_KEY_NAME!,
-            apiKeyPrivateKey: process.env.CDP_API_KEY_PRIVATE_KEY!.replace(
-              /\\n/g,
-              "\n"
-            ),
-          }),
-          morphoActionProvider,
-        ],
-      });
+          // Initialize CDP Wallet Provider
+          const provider = await CdpWalletProvider.configureWithWallet({
+              apiKeyName: process.env.CDP_API_KEY_NAME!,
+              apiKeyPrivateKey: process.env.CDP_API_KEY_PRIVATE_KEY!.replace(/\\n/g, "\n"),
+              networkId: CONFIG.NETWORK.id,
+          });
 
-      // Initialize LangChain agent
-      const llm = new ChatOpenAI({
-        model: "gpt-4o-mini",
-        temperature: 0,
-        maxTokens: 1500,
-      });
+          // Initialize AgentKit with all providers
+          this.agentKit = await AgentKit.from({
+              walletProvider: provider,
+              actionProviders: [
+                  walletActionProvider(),
+                  erc20ActionProvider(),
+                  cdpApiActionProvider({
+                      apiKeyName: process.env.CDP_API_KEY_NAME!,
+                      apiKeyPrivateKey: process.env.CDP_API_KEY_PRIVATE_KEY!.replace(/\\n/g, "\n"),
+                  }),
+                  morphoProvider,
+              ],
+          });
 
-      const tools = await getLangChainTools(this.agentKit);
-      const memory = new MemorySaver();
+          const tools = await getLangChainTools(this.agentKit);
 
-      this.agent = createReactAgent({
-        llm,
-        tools,
-        checkpointSaver: memory,
-        messageModifier: `
-                    You are a yield optimization agent for Morpho markets on Base.
-                    
-                    Available Commands:
-                    1. Wallet Management:
-                        - create wallet: Create a new agent wallet
-                        - deposit: Get instructions for depositing funds
-                        - withdraw [amount]: Withdraw funds from your wallet
-                        - balance: Check your wallet balance
-                    
-                    2. Market Analysis:
-                        - analyze markets: Show current yields and risks
-                        - analyze position: Check your current position
-                    
-                    3. Settings:
-                        - help: Show available commands
-                        - status: Check agent status
-                        - exit: Exit the application
+          this.agent = createReactAgent({
+              llm,
+              tools,
+              checkpointSaver: this.memory,
+              messageModifier: this.getAgentPrompt(),
+          });
 
-                    For automated optimization:
-                    1. Market Analysis:
-                        - Check all supported Morpho markets
-                        - Compare supply APYs
-                        - Verify market health metrics
-
-                    2. Risk Assessment:
-                        - Verify market liquidity (minimum 100k)
-                        - Check utilization rates (avoid > 80%)
-                        - Consider gas costs vs returns
-
-                    3. Strategy Execution:
-                        - Only execute if new APY > current APY + 0.5%
-                        - Ensure gas costs < 5% of expected returns
-                        - Verify transaction success
-
-                    Never execute if:
-                    - Market health is questionable
-                    - Utilization rate > 80%
-                    - Gas costs too high
-                    - Insufficient liquidity
-                `,
-      });
-
-      this.isRunning = true;
-      console.log("Agent initialized successfully");
-    } catch (error) {
-      console.error("Failed to initialize agent:", error);
-      this.isRunning = false;
-      throw error;
-    }
-  }
-
-  async handleUserCommand(command: string, userId?: string): Promise<string> {
-    try {
-        const lowerCommand = command.toLowerCase();
-
-        if (lowerCommand === "help") {
-            return this.getHelpMessage();
-        }
-
-        if (lowerCommand === "create wallet") {
-            const newUserId = Date.now().toString();
-            const address = await this.createUserWallet(newUserId);
-            return `Created new wallet with address: ${address}\nYour user ID is: ${newUserId}\nPlease save this ID for future operations.`;
-        }
-
-        if (!userId && !["help", "create wallet"].includes(lowerCommand)) {
-            return "Please provide your user ID or create a new wallet first.";
-        }
-
-        // Add configuration object with thread_id
-        const agentConfig = {
-            configurable: {
-                thread_id: userId || 'default-thread'
-            }
-        };
-
-        if (lowerCommand === "analyze markets") {
-            const stream = await this.agent.stream(
-                {
-                    messages: [
-                        new HumanMessage(
-                            "Analyze all Morpho markets and show current yields and risks"
-                        ),
-                    ],
-                },
-                agentConfig  // Add the config here
-            );
-            return this.processAgentStream(stream);
-        }
-
-        // Process other commands through agent
-        return this.processAgentStream(
-            await this.agent.stream(
-                {
-                    messages: [new HumanMessage(`${command} for user ${userId}`)],
-                },
-                agentConfig  // Add the config here
-            )
-        );
-    } catch (error: any) {
-        console.error("Error handling command:", error);
-        return `Error: ${error.message}`;
-    }
-}
-
-  private async processAgentStream(stream: any): Promise<string> {
-    let response = "";
-    for await (const chunk of stream) {
-      if ("agent" in chunk) {
-        response += chunk.agent.messages[0].content + "\n";
-      } else if ("tools" in chunk) {
-        response += chunk.tools.messages[0].content + "\n";
+          this.isRunning = true;
+          await this.startMonitoring();
+          await this.startOptimization();
+          
+          this.emit('initialized');
+          return true;
+      } catch (error) {
+          console.error("Failed to initialize agent:", error);
+          this.emit('error', error);
+          return false;
       }
-    }
-    return response;
   }
 
-  private getHelpMessage(): string {
-    return `
-Available Commands:
-- create wallet : Create a new agent wallet
-- deposit : Get deposit instructions
-- withdraw [amount] : Withdraw funds
-- balance : Check wallet balance
-- analyze markets : Show market analysis
-- analyze position : Check your position
-- help : Show this message
-- exit : Exit application
-        `;
+  private getAgentPrompt(): string {
+      return `You are a helpful DeFi assistant specializing in yield optimization on Morpho markets.
+      Your goal is to help users maximize their returns while maintaining safety.
+      
+      When talking to users:
+      - Be conversational and natural
+      - Understand implicit intentions
+      - Guide users through processes step by step
+      - Proactively monitor and suggest improvements
+      - Always consider risk and gas costs
+      
+      Core capabilities:
+      1. Wallet Management
+      - Help users set up and manage wallets
+      - Guide through deposit process
+      - Monitor balances and positions
+      
+      2. Market Analysis
+      - Analyze Morpho markets for best yields
+      - Consider risk factors (utilization, health factor)
+      - Calculate potential returns including gas costs
+      
+      3. Strategy Optimization
+      - Automatically suggest better positions
+      - Consider minimum APY difference (0.5%)
+      - Factor in gas costs vs returns
+      
+      4. Risk Management
+      - Monitor market health
+      - Track position health factors
+      - Alert users to potential risks
+      
+      Remember to be helpful and natural in conversation while maintaining professionalism.`;
   }
 
-  async createUserWallet(userId: string): Promise<string> {
-    if (!this.agentKit) {
-      throw new Error("AgentKit not initialized");
-    }
-    return await this.walletManager.createUserWallet(userId);
+  async processUserMessage(message: string): Promise<string> {
+      if (!this.isRunning || !this.agent) {
+          return "I'm still initializing. Please try again in a moment.";
+      }
+
+      try {
+          if (!this.currentThread) {
+              this.currentThread = Date.now().toString();
+          }
+
+          const config = {
+              configurable: {
+                  thread_id: this.currentThread
+              }
+          };
+
+          const stream = await this.agent.stream(
+              {
+                  messages: [
+                      new SystemMessage("Remember to maintain a natural, helpful conversation."),
+                      new HumanMessage(message)
+                  ]
+              },
+              config
+          );
+
+          const response = await this.processAgentStream(stream);
+          await this.handleImplicitActions(message, response);
+          return response;
+
+      } catch (error: any) {
+          console.error("Error processing message:", error);
+          return "I apologize, but I encountered an error. Could you please rephrase your request?";
+      }
   }
 
-  async checkAndOptimize() {
-    if (!this.isRunning || !this.agentKit) {
-        console.error("Agent not running or not initialized");
-        return;
-    }
+  private async processAgentStream(stream: AsyncIterable<any>): Promise<string> {
+      let response = "";
+      try {
+          for await (const chunk of stream) {
+              if ("agent" in chunk) {
+                  response += chunk.agent.messages[0].content + "\n";
+              } else if ("tools" in chunk) {
+                  response += chunk.tools.messages[0].content + "\n";
+              }
+          }
+          return response.trim();
+      } catch (error) {
+          console.error("Error processing stream:", error);
+          throw error;
+      }
+  }
 
-    const results: AutomatedCheckResult[] = [];
+  private async handleImplicitActions(userMessage: string, agentResponse: string) {
+      try {
+          const intent = await this.agent.invoke(
+              `Analyze this message and identify the user's intent: ${userMessage}`
+          );
 
+          if (intent.includes('create_wallet') && !this.currentThread) {
+              const wallet = await this.walletManager.createWallet();
+              this.currentThread = wallet.userId;
+              this.emit('walletCreated', wallet);
+          }
+
+          if (intent.includes('deposit')) {
+              await this.startDepositMonitoring(this.currentThread!);
+          }
+
+          if (intent.includes('analyze_markets')) {
+              const analysis = await this.analyzeMarkets();
+              this.emit('marketAnalysis', analysis);
+          }
+
+          if (intent.includes('check_position') || intent.includes('balance')) {
+              const status = await this.checkWalletStatus(this.currentThread!);
+              this.emit('walletStatus', status);
+          }
+      } catch (error) {
+          console.error("Error handling implicit actions:", error);
+      }
+  }
+
+  private async startMonitoring() {
+      // Clear any existing intervals
+      if (this.monitoringInterval) {
+          clearInterval(this.monitoringInterval);
+      }
+
+      this.monitoringInterval = setInterval(
+          async () => {
+              try {
+                  await this.monitorWallets();
+              } catch (error) {
+                  console.error("Error in monitoring cycle:", error);
+              }
+          },
+          5 * 60 * 1000
+      );
+  }
+
+  private async startOptimization() {
+      if (this.optimizationInterval) {
+          clearInterval(this.optimizationInterval);
+      }
+
+      this.optimizationInterval = setInterval(
+          async () => {
+              try {
+                  await this.optimizePositions();
+              } catch (error) {
+                  console.error("Error in optimization cycle:", error);
+              }
+          },
+          10 * 60 * 1000
+      );
+  }
+
+  private async startDepositMonitoring(userId: string) {
+      // Clear existing monitoring for this user
+      if (this.depositMonitoringIntervals.has(userId)) {
+          clearInterval(this.depositMonitoringIntervals.get(userId));
+      }
+
+      const interval = setInterval(async () => {
+          try {
+              const status = await this.checkDepositStatus(userId);
+              if (status.hasNewDeposit) {
+                  clearInterval(interval);
+                  this.depositMonitoringIntervals.delete(userId);
+                  this.emit('depositDetected', {
+                      userId,
+                      amount: status.amount,
+                      token: status.token
+                  });
+                  
+                  // Start optimization for the new deposit
+                  await this.optimizePositions([userId]);
+              }
+          } catch (error) {
+              console.error("Error checking deposits:", error);
+          }
+      }, 30000); // Check every 30 seconds
+
+      this.depositMonitoringIntervals.set(userId, interval);
+  }
+
+  private async monitorWallets() {
+      if (!this.isRunning) return;
+
+      try {
+          const wallets = this.walletManager.getAllWallets();
+          for (const [userId, wallet] of wallets) {
+              const status = await this.checkWalletStatus(userId);
+              if (status.needsAttention) {
+                  this.emit('alert', {
+                      userId,
+                      type: status.alertType,
+                      message: status.message
+                  });
+              }
+          }
+      } catch (error) {
+          console.error("Error in wallet monitoring:", error);
+          this.emit('error', {
+              type: 'monitoring',
+              error
+          });
+      }
+  }
+
+  private async checkWalletStatus(userId: string): Promise<WalletStatus> {
+      try {
+          const wallet = await this.walletManager.getWallet(userId);
+          if (!wallet) {
+              return {
+                  needsAttention: true,
+                  alertType: 'error',
+                  message: 'Wallet not found'
+              };
+          }
+
+          const position = await this.agent.invoke("check_position", { userId });
+          const status: WalletStatus = {
+              needsAttention: false,
+              alertType: 'info',
+              message: 'Wallet healthy',
+              position: position
+          };
+
+          // Check health factor
+          if (position && position.healthFactor < 1.05) {
+              status.needsAttention = true;
+              status.alertType = 'warning';
+              status.message = `Low health factor: ${position.healthFactor}`;
+          }
+
+          return status;
+      } catch (error) {
+          console.error("Error checking wallet status:", error);
+          return {
+              needsAttention: true,
+              alertType: 'error',
+              message: 'Error checking wallet status'
+          };
+      }
+  }
+
+  private async checkDepositStatus(userId: string): Promise<DepositStatus> {
+      try {
+          const wallet = await this.walletManager.getWallet(userId);
+          if (!wallet) throw new Error("Wallet not found");
+
+          const balance = await this.agent.invoke("get_balance", { userId });
+          const previousBalance = this.lastKnownBalances.get(userId) || '0';
+
+          if (BigInt(balance) > BigInt(previousBalance)) {
+              this.lastKnownBalances.set(userId, balance);
+              return {
+                  hasNewDeposit: true,
+                  amount: (BigInt(balance) - BigInt(previousBalance)).toString(),
+                  token: 'USDC' // Assuming USDC for now
+              };
+          }
+
+          return {
+              hasNewDeposit: false,
+              amount: '0'
+          };
+      } catch (error) {
+          console.error("Error checking deposit status:", error);
+          return {
+              hasNewDeposit: false,
+              amount: '0'
+          };
+      }
+  }
+
+  private async analyzeMarkets(): Promise<MarketAnalysis[]> {
+      try {
+          // Check cache first
+          const now = Date.now();
+          const cachedAnalysis = Array.from(this.marketCache.values())
+              .filter(entry => (now - entry.timestamp) < this.MARKET_CACHE_TTL)
+              .map(entry => entry.data);
+
+          if (cachedAnalysis.length > 0) {
+              return cachedAnalysis;
+          }
+
+          // If no cache, fetch new data
+          const markets = await this.agent.invoke("analyze_markets");
+          
+          // Update cache
+          markets.forEach((market: MarketAnalysis) => {
+              this.marketCache.set(market.marketId, {
+                  data: market,
+                  timestamp: now
+              });
+          });
+
+          return markets;
+      } catch (error) {
+          console.error("Error analyzing markets:", error);
+          throw error;
+      }
+  }
+
+  private async optimizePositions(specificUsers?: string[]) {
+      try {
+          const wallets = this.walletManager.getAllWallets();
+          const usersToCheck = specificUsers || Array.from(wallets.keys());
+
+          for (const userId of usersToCheck) {
+              const result = await this.optimizeUserPosition(userId.toString());
+              if (result.isProfit) {
+                  this.emit('optimizationFound', result);
+              }
+          }
+      } catch (error) {
+          console.error("Error in optimization:", error);
+      }
+  }
+
+  private async optimizeUserPosition(userId: string): Promise<OptimizationResult> {
     try {
-        const wallets = this.walletManager.getAllWallets();
-        console.log(`Checking ${wallets.length} wallets for optimization`);
-
-        for (const [userId, walletData] of wallets) {
-            const result: AutomatedCheckResult = {
-                timestamp: new Date().toISOString(),
-                walletAddress: walletData.address
+        const currentPosition = await this.agent.invoke("check_position", { userId });
+        if (!currentPosition || !currentPosition.position) {
+            return {
+                userId,
+                isProfit: false,
+                potentialApy: 0,
+                gasCost: '0'
             };
-
-            try {
-                // 1. First check if wallet has any funds
-                const balanceCheck = await this.handleUserCommand('balance', userId);
-                const balances = JSON.parse(balanceCheck);
-                
-                const hasStablecoins = balances.some((b: any) => 
-                    b.token === 'USDC' && BigInt(b.balance) > BigInt(0)
-                );
-
-                if (!hasStablecoins) {
-                    result.error = 'No stablecoin balance found';
-                    results.push(result);
-                    continue;
-                }
-
-                // 2. Get current position
-                const positionCheck = await this.handleUserCommand('analyze position', userId);
-                result.currentPosition = JSON.parse(positionCheck);
-
-                // 3. Analyze markets for better yields
-                const marketAnalysis = await this.handleUserCommand('analyze markets', userId);
-                const markets = JSON.parse(marketAnalysis);
-
-                // 4. Find best opportunity
-                const currentAPY = result.currentPosition?.marketData?.supplyAPY || 0;
-                const bestMarket = markets.reduce((best: any, market: any) => {
-                    if (market.data.supplyAPY > best.data.supplyAPY && 
-                        market.riskMetrics.isHealthy && 
-                        market.riskMetrics.utilizationRisk.status !== 'HIGH') {
-                        return market;
-                    }
-                    return best;
-                }, { data: { supplyAPY: currentAPY } });
-
-                // 5. Check if rebalancing is worth it
-                if (bestMarket.data.supplyAPY > currentAPY + CONFIG.YIELD_MANAGER.minimumAPYDifference) {
-                    // Simulate the rebalancing
-                    const simulation = await this.simulateRebalancing(userId, result.currentPosition, bestMarket);
-                    result.simulation = simulation;
-                    result.recommendedAction = `Rebalance to ${bestMarket.market} for +${(bestMarket.data.supplyAPY - currentAPY).toFixed(2)}% APY`;
-                }
-
-            } catch (error: any) {
-                result.error = `Error processing wallet ${walletData.address}: ${error.message}`;
-            }
-
-            results.push(result);
-            console.log(`Completed check for wallet ${walletData.address}`);
         }
 
-        // Log results
-        console.log('\nAutomated Check Results:', JSON.stringify(results, null, 2));
-        return results;
+        // Get all market data
+        const markets = await this.analyzeMarkets();
+        
+        // Find current market data
+        const currentMarket = markets.find(m => m.marketId === currentPosition.position.marketId);
+        if (!currentMarket) {
+            throw new Error('Current market not found');
+        }
 
-    } catch (error: any) {
-        console.error("Error in optimization cycle:", error);
-        throw error;
-    }
-}
+        // Find best market
+        const bestMarket = markets.reduce((best, market) => {
+            if (market.marketId === currentMarket.marketId) return best;
+            if (!market.isHealthy || market.riskLevel === 'HIGH') return best;
+            if (market.apy <= best.apy) return best;
+            return market;
+        }, currentMarket);
 
-private async simulateRebalancing(
-    userId: string,
-    currentPosition: any,
-    targetMarket: any
-): Promise<any> {
-    try {
-        // 1. Simulate withdrawal from current position
-        const withdrawSimulation = await this.handleUserCommand(
-            `withdraw ${currentPosition.marketId} ${currentPosition.position.supplyAssets}`,
-            userId
-        );
+        // Calculate potential profit
+        const apyDifference = bestMarket.apy - currentMarket.apy;
+        if (apyDifference < CONFIG.YIELD_MANAGER.minimumAPYDifference) {
+            return {
+                userId,
+                currentMarket: currentMarket.marketId,
+                suggestedMarket: bestMarket.marketId,
+                potentialApy: apyDifference,
+                isProfit: false,
+                gasCost: '0'
+            };
+        }
 
-        // 2. Simulate supply to new market
-        const supplySimulation = await this.handleUserCommand(
-            `supply ${targetMarket.marketId} ${currentPosition.position.supplyAssets}`,
-            userId
-        );
+        // Simulate rebalancing to calculate gas costs
+        const simulation = await this.agent.invoke("simulate_rebalance", {
+            userId,
+            currentMarketId: currentPosition.position.marketId,
+            suggestedMarketId: bestMarket.marketId,
+            supplyAmount: currentPosition.position.supplyAmount
+        });
+
+        // Calculate if profitable considering gas costs
+        const positionValue = BigInt(currentPosition.position.supplyAmount);
+        const yearlyProfit = (positionValue * BigInt(Math.floor(apyDifference * 100))) / BigInt(10000);
+        const monthlyProfit = yearlyProfit / BigInt(12);
+        const gasCostBigInt = BigInt(simulation.gasCost || 0);
+
+        const isProfitable = monthlyProfit > gasCostBigInt * BigInt(3); // 3-month payback period
 
         return {
-            withdraw: JSON.parse(withdrawSimulation),
-            supply: JSON.parse(supplySimulation)
+            userId,
+            currentMarket: currentMarket.marketId,
+            suggestedMarket: bestMarket.marketId,
+            potentialApy: apyDifference,
+            isProfit: isProfitable,
+            gasCost: simulation.gasCost
         };
-    } catch (error: any) {
-        throw new Error(`Rebalancing simulation failed: ${error.message}`);
+    } catch (error) {
+        console.error('Error optimizing position:', error);
+        return {
+            userId,
+            isProfit: false,
+            potentialApy: 0,
+            gasCost: '0'
+        };
     }
 }
 
-  private automatedCheckInterval: NodeJS.Timeout | null = null;
+private async executeOptimization(optimization: OptimizationResult) {
+    if (!optimization.isProfit || !optimization.currentMarket || !optimization.suggestedMarket) {
+        return false;
+    }
 
-  async start() {
     try {
-      await this.initialize();
-
-      if (!this.isRunning) {
-        throw new Error("Agent failed to initialize");
-      }
-
-      console.log("\nWelcome to Morpho Yield Maximizer!");
-      console.log('Type "help" to see available commands');
-
-      // Start autonomous checking
-      this.automatedCheckInterval = setInterval(async () => {
-        if (this.isRunning && this.walletManager.getAllWallets().length > 0) {
-          console.log("\nRunning automated yield check...");
-          await this.checkAndOptimize();
-        }
-      }, CONFIG.YIELD_MANAGER.checkInterval);
-
-      // Interactive mode
-      while (this.isRunning) {
-        const input = await new Promise<string>((resolve) =>
-          this.rl.question('\nEnter command (or "help"): ', resolve)
-        );
-
-        if (input.toLowerCase() === "exit") {
-          break;
+        // Get current position
+        const position = await this.agent.invoke("check_position", { userId: optimization.userId });
+        if (!position || !position.position) {
+            throw new Error('Position not found');
         }
 
-        let userId = await new Promise<string>((resolve) =>
-          this.rl.question(
-            "Enter your user ID (or press enter if creating new wallet): ",
-            resolve
-          )
-        );
+        // Execute withdrawal
+        const withdrawResult = await this.agent.invoke("execute_withdraw", {
+            userId: optimization.userId,
+            marketId: optimization.currentMarket,
+            amount: position.position.supplyAmount
+        });
 
-        const response = await this.handleUserCommand(
-          input,
-          userId || undefined
-        );
-        console.log(response);
-      }
+        if (!withdrawResult.success) {
+            throw new Error('Withdrawal failed: ' + withdrawResult.error);
+        }
 
-      this.stop();
+        // Execute supply to new market
+        const supplyResult = await this.agent.invoke("execute_supply", {
+            userId: optimization.userId,
+            marketId: optimization.suggestedMarket,
+            amount: position.position.supplyAmount
+        });
+
+        if (!supplyResult.success) {
+            throw new Error('Supply failed: ' + supplyResult.error);
+        }
+
+        this.emit('optimizationExecuted', {
+            userId: optimization.userId,
+            from: optimization.currentMarket,
+            to: optimization.suggestedMarket,
+            amount: position.position.supplyAmount,
+            apyImprovement: optimization.potentialApy
+        });
+
+        return true;
     } catch (error) {
-      console.error("Fatal error starting agent:", error);
-      this.isRunning = false;
-      throw error;
+        console.error('Error executing optimization:', error);
+        this.emit('error', {
+            type: 'optimization',
+            userId: optimization.userId,
+            error
+        });
+        return false;
     }
-  }
+}
 
-  async stop() {
-    this.isRunning = false;
-    if (this.automatedCheckInterval) {
-      clearInterval(this.automatedCheckInterval);
-      this.automatedCheckInterval = null;
+async start() {
+    try {
+        const initialized = await this.initialize();
+        if (!initialized) {
+            throw new Error("Failed to initialize agent");
+        }
+
+        this.emit('started');
+        return true;
+    } catch (error) {
+        console.error("Error starting agent:", error);
+        this.emit('error', { type: 'startup', error });
+        return false;
     }
-    this.rl.close();
-    console.log("Agent stopped");
-  }
+}
+
+async stop() {
+    try {
+        this.isRunning = false;
+
+        // Clear all intervals
+        if (this.monitoringInterval) {
+            clearInterval(this.monitoringInterval);
+        }
+        if (this.optimizationInterval) {
+            clearInterval(this.optimizationInterval);
+        }
+        for (const interval of this.depositMonitoringIntervals.values()) {
+            clearInterval(interval);
+        }
+        this.depositMonitoringIntervals.clear();
+
+        // Clear caches
+        this.marketCache.clear();
+        this.lastKnownBalances.clear();
+
+        // Stop wallet manager
+        await this.walletManager.stop();
+
+        this.emit('stopped');
+        return true;
+    } catch (error) {
+        console.error("Error stopping agent:", error);
+        this.emit('error', { type: 'shutdown', error });
+        return false;
+    }
+}
 }

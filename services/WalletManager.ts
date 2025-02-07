@@ -1,90 +1,145 @@
 // src/services/WalletManager.ts
 import { 
-    AgentKit, 
     CdpWalletProvider 
 } from "@coinbase/agentkit";
-import { Wallet, WalletData } from "@coinbase/coinbase-sdk";
-import { TimeoutError } from '@coinbase/coinbase-sdk';
+import { 
+    Wallet, 
+    WalletData,
+    TimeoutError
+} from "@coinbase/coinbase-sdk";
+import { CONFIG } from "../config";
+import { StoredWalletData } from "../types";
+import { EventEmitter } from "events";
 import fs from "fs";
+import path from "path";
 
-interface StoredWalletData {
-    address: string;
-    data: WalletData;
-}
-
-export class WalletManager {
+export class WalletManager extends EventEmitter {
     private wallets: Map<string, StoredWalletData> = new Map();
-    private readonly WALLET_DATA_FILE = "wallet_data.json";
+    private readonly WALLET_DIR = "data";
+    private readonly WALLET_FILE = "wallets.json";
+    private backupInterval?: NodeJS.Timeout;
 
     constructor() {
+        super();
+        this.initializeStorage();
         this.loadWallets();
+        this.startBackups();
+    }
+
+    private initializeStorage() {
+        try {
+            if (!fs.existsSync(this.WALLET_DIR)) {
+                fs.mkdirSync(this.WALLET_DIR, { recursive: true });
+            }
+        } catch (error) {
+            console.error('Error initializing storage:', error);
+            throw new Error('Failed to initialize wallet storage');
+        }
+    }
+
+    private get walletPath() {
+        return path.join(this.WALLET_DIR, this.WALLET_FILE);
     }
 
     private loadWallets() {
         try {
-            if (fs.existsSync(this.WALLET_DATA_FILE)) {
-                const data = JSON.parse(fs.readFileSync(this.WALLET_DATA_FILE, 'utf8'));
+            if (fs.existsSync(this.walletPath)) {
+                const data = JSON.parse(fs.readFileSync(this.walletPath, 'utf8'));
                 this.wallets = new Map(Object.entries(data));
+                this.emit('walletsLoaded', this.wallets.size);
             }
         } catch (error) {
             console.error('Error loading wallets:', error);
+            // Create backup of corrupted file
+            if (fs.existsSync(this.walletPath)) {
+                const backup = `${this.walletPath}.backup.${Date.now()}`;
+                fs.copyFileSync(this.walletPath, backup);
+                this.emit('backupCreated', backup);
+            }
         }
     }
 
     private saveWallets() {
         try {
-            fs.writeFileSync(
-                this.WALLET_DATA_FILE,
-                JSON.stringify(Object.fromEntries(this.wallets))
-            );
+            const tempFile = `${this.walletPath}.temp`;
+            const data = Object.fromEntries(this.wallets);
+            
+            // Write to temporary file first
+            fs.writeFileSync(tempFile, JSON.stringify(data, null, 2));
+            
+            // Rename temp file to actual file (atomic operation)
+            fs.renameSync(tempFile, this.walletPath);
+            
+            this.emit('walletsSaved', this.wallets.size);
         } catch (error) {
             console.error('Error saving wallets:', error);
+            this.emit('error', { type: 'saveFailed', error });
+            throw error;
         }
     }
 
-    async createUserWallet(userId: string): Promise<string> {
-        if (!userId || typeof userId !== 'string') {
-            throw new Error('Invalid user ID provided');
-        }
-
-        try {
-            // Add validation for existing wallet
-            const existing = this.wallets.get(userId);
-            if (existing) {
-                // Verify wallet is still valid
-                const provider = await this.getWallet(userId);
-                if (provider) {
-                    return existing.address;
+    private startBackups() {
+        // Create periodic backups
+        this.backupInterval = setInterval(() => {
+            const backup = `${this.walletPath}.backup.${Date.now()}`;
+            try {
+                if (fs.existsSync(this.walletPath)) {
+                    fs.copyFileSync(this.walletPath, backup);
+                    this.emit('backupCreated', backup);
                 }
-                // If not valid, remove it
-                this.wallets.delete(userId);
+            } catch (error) {
+                console.error('Backup creation failed:', error);
+                this.emit('error', { type: 'backupFailed', error });
             }
+        }, 24 * 60 * 60 * 1000); // Daily backups
+    }
 
-            // Create new wallet with CDP
-            const wallet = await Wallet.create({
-                networkId: "base-mainnet"
+    async createWallet(): Promise<{ userId: string; address: string }> {
+        try {
+            // Create a unique user ID
+            const userId = `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+            // Create CDP wallet
+            const provider = await CdpWalletProvider.configureWithWallet({
+                apiKeyName: process.env.CDP_API_KEY_NAME!,
+                apiKeyPrivateKey: process.env.CDP_API_KEY_PRIVATE_KEY!.replace(/\\n/g, "\n"),
+                networkId: CONFIG.NETWORK.id,
             });
 
-            // Export wallet data
-            const walletData = await wallet.export();
-            
-            // Store wallet information
-            const storedData: StoredWalletData = {
-                address: (await wallet.getDefaultAddress()).toString(),
-                data: walletData
-            };
-            
-            this.wallets.set(userId, storedData);
-            this.saveWallets();
+            // Get wallet address
+            const address = await provider.getAddress();
 
-            return storedData.address;
+            // Store wallet data
+            const walletData: StoredWalletData = {
+                userId,
+                address,
+                data: {
+                    walletId: userId,
+                    networkId: CONFIG.NETWORK.id,
+                    seed: await this.generateSecureSeed()
+                }
+            };
+
+            this.wallets.set(userId, walletData);
+            await this.saveWallets();
+
+            this.emit('walletCreated', { userId, address });
+            return { userId, address };
         } catch (error) {
-            // Improved error handling
             if (error instanceof TimeoutError) {
-                throw new Error(`Wallet creation timed out for user ${userId}`);
+                this.emit('error', { type: 'timeout', error });
+                throw new Error('Wallet creation timed out. Please try again.');
             }
+            // Generic error handling
+            this.emit('error', { type: 'creation', error });
             throw error;
         }
+    }
+
+    private async generateSecureSeed(): Promise<string> {
+        // Generate secure random bytes for wallet seed
+        const crypto = await import('crypto');
+        return crypto.randomBytes(32).toString('hex');
     }
 
     async getWallet(userId: string): Promise<CdpWalletProvider | null> {
@@ -92,15 +147,51 @@ export class WalletManager {
         if (!storedData) return null;
 
         try {
-            return await CdpWalletProvider.configureWithWallet({
+            // Create provider with stored data
+            const provider = await CdpWalletProvider.configureWithWallet({
                 apiKeyName: process.env.CDP_API_KEY_NAME!,
-                apiKeyPrivateKey: process.env.CDP_API_KEY_PRIVATE_KEY?.replace(/\\n/g, "\n"),
-                networkId: "base-mainnet",
+                apiKeyPrivateKey: process.env.CDP_API_KEY_PRIVATE_KEY!.replace(/\\n/g, "\n"),
+                networkId: storedData.data.networkId,
                 cdpWalletData: JSON.stringify(storedData.data)
             });
+
+            // Verify provider is working
+            const address = await provider.getAddress();
+            if (address.toLowerCase() !== storedData.address.toLowerCase()) {
+                throw new Error('Wallet address mismatch');
+            }
+
+            return provider;
         } catch (error) {
-            console.error('Error configuring wallet provider:', error);
+            console.error('Error getting wallet:', error);
+            this.emit('error', { type: 'provider', userId, error });
             return null;
+        }
+    }
+
+    async getWalletByAddress(address: string): Promise<{ userId: string; provider: CdpWalletProvider } | null> {
+        for (const [userId, walletData] of this.wallets.entries()) {
+            if (walletData.address.toLowerCase() === address.toLowerCase()) {
+                const provider = await this.getWallet(userId);
+                if (provider) {
+                    return { userId, provider };
+                }
+            }
+        }
+        return null;
+    }
+
+    async validateWallet(userId: string): Promise<boolean> {
+        try {
+            const provider = await this.getWallet(userId);
+            if (!provider) return false;
+
+            // Check provider functionality
+            const address = await provider.getAddress();
+
+            return !!address;
+        } catch {
+            return false;
         }
     }
 
@@ -108,15 +199,19 @@ export class WalletManager {
         return Array.from(this.wallets.entries());
     }
 
-    async getWalletByAddress(address: string): Promise<[string, CdpWalletProvider] | null> {
-        for (const [userId, walletData] of this.wallets.entries()) {
-            if (walletData.address.toLowerCase() === address.toLowerCase()) {
-                const provider = await this.getWallet(userId);
-                if (provider) {
-                    return [userId, provider];
-                }
-            }
+    async deleteWallet(userId: string): Promise<boolean> {
+        const wallet = this.wallets.get(userId);
+        if (!wallet) return false;
+
+        this.wallets.delete(userId);
+        await this.saveWallets();
+        this.emit('walletDeleted', userId);
+        return true;
+    }
+
+    stop() {
+        if (this.backupInterval) {
+            clearInterval(this.backupInterval);
         }
-        return null;
     }
 }

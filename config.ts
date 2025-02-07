@@ -62,7 +62,7 @@ export const CONFIG = {
     },
   },
   YIELD_MANAGER: {
-    address: "YOUR_DEPLOYED_ADDRESS",
+    address: "0xF2Fb577A220429cea79DF942ee8E546014e84f4F",
     minimumAPYDifference: 0.5, // 0.5% minimum difference to trigger strategy change
     checkInterval: 60 * 60 * 1000, // 1 hour in milliseconds
   },

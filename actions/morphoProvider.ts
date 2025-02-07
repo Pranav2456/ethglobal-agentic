@@ -6,12 +6,14 @@ import { z } from "zod";
 import { Time } from "@morpho-org/morpho-ts";
 import { MarketId } from "@morpho-org/blue-sdk";
 import { Market } from "@morpho-org/blue-sdk-viem/lib/augment/Market";
-import { MarketParams } from "@morpho-org/blue-sdk-viem/lib/augment/MarketParams";
+import { AccrualPosition } from "@morpho-org/blue-sdk-viem/lib/augment/Position";
 import { CONFIG, MARKET_RISK_LEVELS } from '../config';
 import { 
-    MarketResult, 
+    Protocol,
+    MarketData,
+    Position,
     SimulationResult,
-    RiskMetrics 
+    TransactionRequest
 } from "../types";
 import { 
     publicClient, 
@@ -19,87 +21,77 @@ import {
     simulateStrategy, 
     estimateGasCosts 
 } from "../utils/viem";
-import { formatUnits, parseUnits } from "ethers";
-import { EventEmitter } from "events";
+import { formatUnits, parseUnits } from "viem";
+import EventEmitter from "events";
 import { PublicClient } from "viem";
-import { AccrualPosition } from "@morpho-org/blue-sdk-viem/lib/augment/Position";
+
+// Add type guard for token names
+type TokenName = keyof typeof CONFIG.TOKENS;
 
 class MorphoProvider extends EventEmitter {
-    private lastMarketUpdate: Map<string, { timestamp: number; data: MarketResult }> = new Map();
-    private readonly UPDATE_THRESHOLD = 5 * 60 * 1000; // 5 minutes
+    private marketCache: Map<string, { data: MarketData; timestamp: number }> = new Map();
+    private readonly CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
     constructor() {
         super();
     }
 
-    // Convert wad values to percentages
     private wadToPercentage(wadValue: bigint): number {
         return Number(wadValue) / 1e18 * 100;
     }
 
-    // Calculate risk metrics for a market
-    private calculateRiskMetrics(market: Market): RiskMetrics {
-        const utilization = this.wadToPercentage(market.utilization);
-        
-        return {
-            isHealthy: market.totalBorrowAssets <= market.totalSupplyAssets,
-            utilizationRisk: {
-                current: utilization,
-                status: utilization > MARKET_RISK_LEVELS.HIGH_UTILIZATION ? 'HIGH' :
-                        utilization > MARKET_RISK_LEVELS.MEDIUM_UTILIZATION ? 'MEDIUM' : 'LOW'
-            }
-        };
-    }
-
-    // Get cached market data or fetch new
-    private async getMarketData(marketId: string): Promise<MarketResult> {
-        const cached = this.lastMarketUpdate.get(marketId);
+    private async getMarketData(marketId: string): Promise<MarketData> {
+        const cached = this.marketCache.get(marketId);
         const now = Date.now();
 
-        if (cached && (now - cached.timestamp) < this.UPDATE_THRESHOLD) {
+        if (cached && (now - cached.timestamp) < this.CACHE_TTL) {
             return cached.data;
         }
 
-        const marketData = await Market.fetch(marketId as MarketId, publicClient);
-        const accruedMarket = marketData.accrueInterest(Time.timestamp());
+        const market = await Market.fetch(marketId as MarketId, publicClient);
+        const accruedMarket = market.accrueInterest(Time.timestamp());
         
-        const result = await this.formatMarketData(marketId, accruedMarket);
-        this.lastMarketUpdate.set(marketId, { timestamp: now, data: result });
-        
-        return result;
-    }
-
-    // Format market data into standard structure
-    private async formatMarketData(marketId: string, market: Market): Promise<MarketResult> {
-        const marketConfig = Object.entries(CONFIG.MORPHO.markets)
+        const config = Object.entries(CONFIG.MORPHO.markets)
             .find(([_, m]) => m.id === marketId);
 
-        if (!marketConfig) {
-            throw new Error('Market configuration not found');
-        }
+        if (!config) throw new Error('Market configuration not found');
+        const [name, marketConfig] = config;
 
-        const [name, config] = marketConfig;
-        const utilization = this.wadToPercentage(market.utilization);
+        // In the getMarketData method, add type assertion
+        const collateralToken = marketConfig.collateralToken as TokenName;
+        const loanToken = marketConfig.loanToken as TokenName;
 
-        return {
-            timestamp: new Date().toISOString(),
-            market: name,
-            data: {
-                supplyAPY: this.wadToPercentage(market.supplyApy),
-                borrowAPY: this.wadToPercentage(market.borrowApy),
-                utilization,
-                totalSupplyAssets: market.totalSupplyAssets.toString(),
-                totalBorrowAssets: market.totalBorrowAssets.toString(),
-                liquidity: market.liquidity.toString(),
-                lltv: config.lltv,
-                collateralToken: CONFIG.TOKENS[config.collateralToken as keyof typeof CONFIG.TOKENS].address as `0x${string}`,
-                loanToken: CONFIG.TOKENS[config.loanToken as keyof typeof CONFIG.TOKENS].address as `0x${string}`
+        const utilization = this.wadToPercentage(accruedMarket.utilization);
+        const marketData: MarketData = {
+            protocol: Protocol.MORPHO,
+            name,
+            marketId,
+            apy: {
+                supply: this.wadToPercentage(accruedMarket.supplyApy),
+                borrow: this.wadToPercentage(accruedMarket.borrowApy)
             },
-            riskMetrics: this.calculateRiskMetrics(market)
+            metrics: {
+                utilization,
+                totalSupply: accruedMarket.totalSupplyAssets.toString(),
+                totalBorrow: accruedMarket.totalBorrowAssets.toString(),
+                liquidity: accruedMarket.liquidity.toString(),
+                lltv: marketConfig.lltv
+            },
+            tokens: {
+                collateral: CONFIG.TOKENS[collateralToken].address as `0x${string}`,
+                loan: CONFIG.TOKENS[loanToken].address as `0x${string}`
+            },
+            risk: {
+                isHealthy: accruedMarket.totalBorrowAssets <= accruedMarket.totalSupplyAssets,
+                utilizationRisk: utilization > MARKET_RISK_LEVELS.HIGH_UTILIZATION ? 'HIGH' :
+                               utilization > MARKET_RISK_LEVELS.MEDIUM_UTILIZATION ? 'MEDIUM' : 'LOW'
+            }
         };
+
+        this.marketCache.set(marketId, { data: marketData, timestamp: now });
+        return marketData;
     }
 
-    // Create action provider
     public createProvider() {
         return customActionProvider<CdpWalletProvider>({
             name: "morpho_market_action",
@@ -141,15 +133,62 @@ class MorphoProvider extends EventEmitter {
     private async analyzeMarkets(): Promise<string> {
         try {
             const markets = await Promise.all(
-                Object.entries(CONFIG.MORPHO.markets).map(async ([_, market]) => {
-                    return await this.getMarketData(market.id);
-                })
+                Object.entries(CONFIG.MORPHO.markets)
+                    .map(async ([_, market]) => this.getMarketData(market.id))
             );
 
-            this.emit('marketsAnalyzed', markets);
             return JSON.stringify(markets);
         } catch (error) {
-            this.emit('error', { type: 'analysis', error });
+            console.error('Error analyzing markets:', error);
+            throw error;
+        }
+    }
+
+    private async checkPosition(
+        userAddress: `0x${string}`,
+        marketId?: string
+    ): Promise<string> {
+        try {
+            const positions: Position[] = [];
+
+            const marketsToCheck = marketId 
+                ? [{ id: marketId }]
+                : Object.values(CONFIG.MORPHO.markets);
+
+            for (const market of marketsToCheck) {
+                try {
+                    const position = await AccrualPosition.fetch(
+                        userAddress,
+                        market.id as MarketId,
+                        publicClient
+                    );
+
+                    const accruedPosition = position.accrueInterest(Time.timestamp());
+                    const marketData = await this.getMarketData(market.id);
+
+                    if (accruedPosition.supplyAssets > BigInt(0) || accruedPosition.borrowAssets > BigInt(0)) {
+                        positions.push({
+                            protocol: Protocol.MORPHO,
+                            marketId: market.id,
+                            token: marketData.name,
+                            supplyAmount: accruedPosition.supplyAssets.toString(),
+                            borrowAmount: accruedPosition.borrowAssets.toString(),
+                            healthFactor: Number(accruedPosition.ltv || 0),
+                            collateralEnabled: true,
+                            metrics: {
+                                supplyAPY: marketData.apy.supply,
+                                borrowAPY: marketData.apy.borrow
+                            }
+                        });
+                    }
+                } catch (error) {
+                    console.warn(`Error fetching position for market ${market.id}:`, error);
+                }
+            }
+
+            return JSON.stringify(positions);
+        } catch (error) {
+            console.error('Error checking positions:', error);
             throw error;
         }
     }
@@ -163,85 +202,60 @@ class MorphoProvider extends EventEmitter {
         }
 
         try {
-            // Verify market health first
             const marketData = await this.getMarketData(args.marketId);
-            if (!marketData.riskMetrics.isHealthy) {
+            if (!marketData.risk.isHealthy) {
                 throw new Error('Market conditions unsafe for supply');
             }
 
-            // Get token info
-            const token = CONFIG.TOKENS[marketData.data.loanToken as keyof typeof CONFIG.TOKENS];
-            if (!token) {
-                throw new Error('Token configuration not found');
-            }
-
-            // Parse amount with proper decimals
-            const amount = parseUnits(args.amount, token.decimals);
+            const amount = parseUnits(args.amount, CONFIG.TOKENS[marketData.name as TokenName].decimals);
 
             // Simulate approval
-            const approvalSimulation = await simulateApproval(
+            const approvalSim = await simulateApproval(
                 publicClient as PublicClient,
                 userAddress,
-                token.address as `0x${string}`,
+                marketData.tokens.loan,
                 CONFIG.YIELD_MANAGER.address as `0x${string}`,
                 amount
             );
 
-            if (!approvalSimulation.success) {
-                throw new Error(`Approval simulation failed: ${approvalSimulation.error}`);
+            if (!approvalSim.success) {
+                throw new Error(`Approval simulation failed: ${approvalSim.error}`);
             }
 
             // Simulate supply
-            const supplySimulation = await simulateStrategy(
+            const supplySim = await simulateStrategy(
                 publicClient as PublicClient,
                 userAddress,
                 {
+                    protocol: Protocol.MORPHO,
                     action: 'supply',
                     marketId: args.marketId,
-                    token: token.address as `0x${string}`,
+                    token: marketData.tokens.loan,
                     amount
                 },
                 CONFIG.YIELD_MANAGER.address as `0x${string}`,
                 CONFIG.MORPHO.address as `0x${string}`
             );
 
-            if (!supplySimulation.success) {
-                throw new Error(`Supply simulation failed: ${supplySimulation.error}`);
+            if (!supplySim.success) {
+                throw new Error(`Supply simulation failed: ${supplySim.error}`);
             }
 
-            // Calculate gas costs
-            const totalGasEstimate = (approvalSimulation.gasEstimate || BigInt(0)) + 
-                                   (supplySimulation.gasEstimate || BigInt(0));
+            const totalGas = (approvalSim.gasEstimate || BigInt(0)) + 
+                           (supplySim.gasEstimate || BigInt(0));
             
-            const { gasCost, gasPrice } = await estimateGasCosts(publicClient as PublicClient, totalGasEstimate);
-
-            // Check if gas cost is reasonable compared to amount
-            const gasCostPercentage = Number(gasCost) / Number(amount) * 100;
-            if (gasCostPercentage > CONFIG.TRANSACTIONS.MAX_GAS_COST_PERCENTAGE) {
-                throw new Error('Gas cost too high relative to supply amount');
-            }
-
-            this.emit('supplySimulated', {
-                userAddress,
-                marketId: args.marketId,
-                amount: args.amount,
-                gasCost: formatUnits(gasCost, 'gwei')
-            });
+            const { gasCost, gasPrice } = await estimateGasCosts(publicClient as PublicClient, totalGas);
 
             return JSON.stringify({
                 success: true,
-                simulations: {
-                    approval: approvalSimulation,
-                    supply: supplySimulation
-                },
+                simulations: { approval: approvalSim, supply: supplySim },
                 estimates: {
-                    totalGas: totalGasEstimate.toString(),
+                    totalGas: totalGas.toString(),
                     gasCost: gasCost.toString(),
                     gasPrice: gasPrice.toString()
                 }
             });
         } catch (error: any) {
-            this.emit('error', { type: 'supply', error });
             throw error;
         }
     }
@@ -255,25 +269,17 @@ class MorphoProvider extends EventEmitter {
         }
 
         try {
-            // Get market data and verify
             const marketData = await this.getMarketData(args.marketId);
-            const token = CONFIG.TOKENS[marketData.data.loanToken as keyof typeof CONFIG.TOKENS];
-            
-            if (!token) {
-                throw new Error('Token configuration not found');
-            }
+            const amount = parseUnits(args.amount, CONFIG.TOKENS[marketData.name as TokenName].decimals);
 
-            // Parse amount
-            const amount = parseUnits(args.amount, token.decimals);
-
-            // Simulate withdrawal
-            const withdrawSimulation = await simulateStrategy(
+            const withdrawSim = await simulateStrategy(
                 publicClient as PublicClient,
                 userAddress,
                 {
+                    protocol: Protocol.MORPHO,
                     action: 'withdraw',
                     marketId: args.marketId,
-                    token: token.address as `0x${string}`,
+                    token: marketData.tokens.loan,
                     amount,
                     shares: args.shares ? BigInt(args.shares) : undefined
                 },
@@ -281,124 +287,26 @@ class MorphoProvider extends EventEmitter {
                 CONFIG.MORPHO.address as `0x${string}`
             );
 
-            if (!withdrawSimulation.success) {
-                throw new Error(`Withdraw simulation failed: ${withdrawSimulation.error}`);
+            if (!withdrawSim.success) {
+                throw new Error(`Withdraw simulation failed: ${withdrawSim.error}`);
             }
 
-            // Calculate gas costs
             const { gasCost, gasPrice } = await estimateGasCosts(
                 publicClient as PublicClient,
-                withdrawSimulation.gasEstimate || BigInt(0)
+                withdrawSim.gasEstimate || BigInt(0)
             );
-
-            this.emit('withdrawSimulated', {
-                userAddress,
-                marketId: args.marketId,
-                amount: args.amount,
-                gasCost: formatUnits(gasCost, 'gwei')
-            });
 
             return JSON.stringify({
                 success: true,
-                simulation: withdrawSimulation,
+                simulation: withdrawSim,
                 estimates: {
-                    gas: withdrawSimulation.gasEstimate?.toString(),
+                    gas: withdrawSim.gasEstimate?.toString(),
                     gasCost: gasCost.toString(),
                     gasPrice: gasPrice.toString()
                 }
             });
         } catch (error: any) {
-            this.emit('error', { type: 'withdraw', error });
             throw error;
-        }
-    }
-
-    private async checkPosition(
-        userAddress: `0x${string}`,
-        marketId?: string
-    ): Promise<string> {
-        try {
-            if (marketId) {
-                // Check single market position
-                const market = await this.getMarketData(marketId);
-                const position = await this.getMarketPosition(userAddress, marketId, market);
-
-                return JSON.stringify({
-                    marketId,
-                    position,
-                    marketData: {
-                        supplyAPY: market.data.supplyAPY,
-                        borrowAPY: market.data.borrowAPY,
-                        utilization: market.data.utilization
-                    }
-                });
-            } else {
-                // Check all market positions
-                const positions = await Promise.all(
-                    Object.entries(CONFIG.MORPHO.markets).map(async ([name, market]) => {
-                        const marketData = await this.getMarketData(market.id);
-                        const position = await this.getMarketPosition(userAddress, market.id, marketData);
-
-                        return {
-                            market: name,
-                            marketId: market.id,
-                            position,
-                            marketData: {
-                                supplyAPY: marketData.data.supplyAPY,
-                                borrowAPY: marketData.data.borrowAPY,
-                                utilization: marketData.data.utilization
-                            }
-                        };
-                    })
-                );
-
-                return JSON.stringify(positions);
-            }
-        } catch (error: any) {
-            this.emit('error', { type: 'position_check', error });
-            throw error;
-        }
-    }
-
-    private async getMarketPosition(
-    userAddress: `0x${string}`,
-    marketId: string,
-    marketData: MarketResult
-) {
-    try {
-        // Fetch position using Morpho SDK
-        const position = await AccrualPosition.fetch(
-            userAddress,
-            marketId as MarketId,
-            publicClient
-        );
-
-        // Accrue interest to the latest timestamp
-        const accruedPosition = position.accrueInterest(Time.timestamp());
-
-        // Get market for additional calculations
-        const market = await Market.fetch(marketId as MarketId, publicClient);
-        const accruedMarket = market.accrueInterest(Time.timestamp());
-
-        // Calculate health factor (using SDK's built-in values)
-        const healthFactor = accruedPosition.supplyAssets > BigInt(0) ? 
-            Number(accruedPosition.supplyAssets * BigInt(100) / (accruedPosition.borrowAssets || BigInt(1))) / 100 : 0;
-
-        return {
-            supplyShares: accruedPosition.supplyShares.toString(),
-            borrowShares: accruedPosition.borrowShares.toString(),
-            supplyAssets: accruedPosition.supplyAssets.toString(),
-            borrowAssets: accruedPosition.borrowAssets.toString(),
-            healthFactor,
-            isHealthy: accruedPosition.isHealthy,
-            maxBorrowable: accruedPosition.maxBorrowableAssets?.toString(),
-            // Additional data from SDK
-            ltv: accruedPosition.ltv,
-            collateralValue: accruedPosition.collateralValue?.toString()
-        };
-    } catch (error) {
-        console.error('Error getting market position:', error);
-        throw error;
         }
     }
 }

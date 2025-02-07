@@ -13,8 +13,6 @@ import {
 import * as markets from '@bgd-labs/aave-address-book';
 import { formatReservesAndIncentives, formatUserSummaryAndIncentives } from '@aave/math-utils';
 import dayjs from 'dayjs';
-import { CONFIG } from '../config';
-import { MarketResult, SimulationResult } from "../types";
 
 class AaveProvider {
     private poolDataProvider: UiPoolDataProvider;
@@ -22,7 +20,7 @@ class AaveProvider {
     private marketCache: Map<string, { data: any; timestamp: number }> = new Map();
     private readonly CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
-    constructor(provider: ethers.Provider) {
+    constructor(provider: ethers.providers.Provider) {
         // Initialize Aave data providers
         this.poolDataProvider = new UiPoolDataProvider({
             uiPoolDataProviderAddress: markets.AaveV3Base.UI_POOL_DATA_PROVIDER,
@@ -218,6 +216,6 @@ class AaveProvider {
 }
 
 // Create and export provider instance
-export const aaveProvider = new AaveProvider(new ethers.JsonRpcProvider(
-    CONFIG.NETWORK.rpcUrl
+export const aaveProvider = new AaveProvider(new ethers.providers.JsonRpcProvider(
+    "https://base-mainnet.g.alchemy.com/v2/Y8rMH9-oKPNkA0yWyZG6xnZsF4MqLIQl"
 )).createProvider();

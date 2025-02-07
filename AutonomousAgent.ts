@@ -12,8 +12,18 @@ import { createReactAgent } from "@langchain/langgraph/prebuilt";
 import { MemorySaver } from "@langchain/langgraph";
 import { WalletManager } from "./services/WalletManager";
 import { morphoProvider } from "./actions/morphoProvider";
+import { aaveProvider } from "./actions/aaveProvider";
 import { CONFIG } from "./config";
-import { WalletStatus, DepositStatus, MarketAnalysis, OptimizationResult } from "./agent.types"
+import {
+  Protocol,
+  MarketData,
+  Position,
+  WalletStatus,
+  DepositStatus,
+  OptimizationResult,
+  AlertType,
+  MultiProtocolAnalysis,
+} from "./types";
 import EventEmitter from "events";
 
 export class AutonomousAgent extends EventEmitter {
@@ -27,68 +37,78 @@ export class AutonomousAgent extends EventEmitter {
   private optimizationInterval?: NodeJS.Timeout;
   private depositMonitoringIntervals: Map<string, NodeJS.Timeout> = new Map();
   private lastKnownBalances: Map<string, string> = new Map();
-  private marketCache: Map<string, { data: MarketAnalysis; timestamp: number }> = new Map();
+  private marketCache: Map<string, { data: MarketData; timestamp: number }> =
+    new Map();
   private readonly MARKET_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
   constructor() {
-      super();
-      this.walletManager = new WalletManager();
-      this.memory = new MemorySaver();
+    super();
+    this.walletManager = new WalletManager();
+    this.memory = new MemorySaver();
   }
 
   async initialize() {
-      try {
-          const llm = new ChatOpenAI({
-              modelName: "gpt-4-turbo-preview",
-              temperature: 0.7,
-          });
+    try {
+      const llm = new ChatOpenAI({
+        modelName: "gpt-4-turbo-preview",
+        temperature: 0.7,
+      });
 
-          // Initialize CDP Wallet Provider
-          const provider = await CdpWalletProvider.configureWithWallet({
-              apiKeyName: process.env.CDP_API_KEY_NAME!,
-              apiKeyPrivateKey: process.env.CDP_API_KEY_PRIVATE_KEY!.replace(/\\n/g, "\n"),
-              networkId: CONFIG.NETWORK.id,
-          });
+      const provider = await CdpWalletProvider.configureWithWallet({
+        apiKeyName: process.env.CDP_API_KEY_NAME!,
+        apiKeyPrivateKey: process.env.CDP_API_KEY_PRIVATE_KEY!.replace(
+          /\\n/g,
+          "\n"
+        ),
+        networkId: CONFIG.NETWORK.id,
+      });
 
-          // Initialize AgentKit with all providers
-          this.agentKit = await AgentKit.from({
-              walletProvider: provider,
-              actionProviders: [
-                  walletActionProvider(),
-                  erc20ActionProvider(),
-                  cdpApiActionProvider({
-                      apiKeyName: process.env.CDP_API_KEY_NAME!,
-                      apiKeyPrivateKey: process.env.CDP_API_KEY_PRIVATE_KEY!.replace(/\\n/g, "\n"),
-                  }),
-                  morphoProvider,
-              ],
-          });
+      this.agentKit = await AgentKit.from({
+        walletProvider: provider,
+        actionProviders: [
+          walletActionProvider(),
+          erc20ActionProvider(),
+          cdpApiActionProvider({
+            apiKeyName: process.env.CDP_API_KEY_NAME!,
+            apiKeyPrivateKey: process.env.CDP_API_KEY_PRIVATE_KEY!.replace(
+              /\\n/g,
+              "\n"
+            ),
+          }),
+          morphoProvider,
+          aaveProvider,
+        ],
+      });
 
-          const tools = await getLangChainTools(this.agentKit);
+      const tools = await getLangChainTools(this.agentKit);
 
-          this.agent = createReactAgent({
-              llm,
-              tools,
-              checkpointSaver: this.memory,
-              messageModifier: this.getAgentPrompt(),
-          });
+      this.agent = createReactAgent({
+        llm,
+        tools,
+        checkpointSaver: this.memory,
+        messageModifier: this.getAgentPrompt(),
+      });
 
-          this.isRunning = true;
-          await this.startMonitoring();
-          await this.startOptimization();
-          
-          this.emit('initialized');
-          return true;
-      } catch (error) {
-          console.error("Failed to initialize agent:", error);
-          this.emit('error', error);
-          return false;
-      }
+      this.isRunning = true;
+      await this.startMonitoring();
+      await this.startOptimization();
+
+      this.emit("initialized");
+      return true;
+    } catch (error) {
+      console.error("Failed to initialize agent:", error);
+      this.emit("error", error);
+      return false;
+    }
   }
 
   private getAgentPrompt(): string {
-      return `You are a helpful DeFi assistant specializing in yield optimization on Morpho markets.
+    return `You are a DeFi assistant specializing in yield optimization across multiple protocols.
       Your goal is to help users maximize their returns while maintaining safety.
+      
+      Available Protocols:
+      - Morpho: Advanced lending protocol with optimal rates
+      - Aave: Leading lending protocol with deep liquidity
       
       When talking to users:
       - Be conversational and natural
@@ -98,489 +118,656 @@ export class AutonomousAgent extends EventEmitter {
       - Always consider risk and gas costs
       
       Core capabilities:
-      1. Wallet Management
-      - Help users set up and manage wallets
-      - Guide through deposit process
-      - Monitor balances and positions
+      1. Multi-Protocol Management
+      - Compare yields across protocols
+      - Analyze risk-reward ratios
+      - Optimize positions across platforms
       
       2. Market Analysis
-      - Analyze Morpho markets for best yields
-      - Consider risk factors (utilization, health factor)
-      - Calculate potential returns including gas costs
+      - Real-time APY tracking
+      - Risk factor assessment
+      - Liquidity monitoring
       
-      3. Strategy Optimization
-      - Automatically suggest better positions
-      - Consider minimum APY difference (0.5%)
-      - Factor in gas costs vs returns
+      3. Portfolio Optimization
+      - Cross-protocol yield optimization
+      - Gas-efficient rebalancing
+      - Risk-adjusted returns
       
       4. Risk Management
-      - Monitor market health
-      - Track position health factors
-      - Alert users to potential risks
+      - Health factor monitoring
+      - Protocol-specific risks
+      - Market condition alerts
       
-      Remember to be helpful and natural in conversation while maintaining professionalism.`;
+      Remember to be helpful and natural while prioritizing safety.`;
   }
 
   async processUserMessage(message: string): Promise<string> {
-      if (!this.isRunning || !this.agent) {
-          return "I'm still initializing. Please try again in a moment.";
+    if (!this.isRunning || !this.agent) {
+      return "I'm still initializing. Please try again in a moment.";
+    }
+
+    try {
+      // Ensure we have a thread ID
+      if (!this.currentThread) {
+        this.currentThread = Date.now().toString();
       }
 
-      try {
-          if (!this.currentThread) {
-              this.currentThread = Date.now().toString();
-          }
+      const config = {
+        configurable: {
+          thread_id: this.currentThread,
+        },
+      };
 
-          const config = {
-              configurable: {
-                  thread_id: this.currentThread
-              }
-          };
+      const stream = await this.agent.stream(
+        {
+          messages: [
+            new SystemMessage(
+              "Remember to maintain a natural, helpful conversation."
+            ),
+            new HumanMessage(message),
+          ],
+        },
+        config
+      );
 
-          const stream = await this.agent.stream(
-              {
-                  messages: [
-                      new SystemMessage("Remember to maintain a natural, helpful conversation."),
-                      new HumanMessage(message)
-                  ]
-              },
-              config
-          );
-
-          const response = await this.processAgentStream(stream);
-          await this.handleImplicitActions(message, response);
-          return response;
-
-      } catch (error: any) {
-          console.error("Error processing message:", error);
-          return "I apologize, but I encountered an error. Could you please rephrase your request?";
-      }
+      const response = await this.processAgentStream(stream);
+      await this.handleImplicitActions(message, response);
+      return response;
+    } catch (error: any) {
+      console.error("Error processing message:", error);
+      return "I apologize, but I encountered an error. Could you please rephrase your request?";
+    }
   }
 
-  private async processAgentStream(stream: AsyncIterable<any>): Promise<string> {
-      let response = "";
-      try {
-          for await (const chunk of stream) {
-              if ("agent" in chunk) {
-                  response += chunk.agent.messages[0].content + "\n";
-              } else if ("tools" in chunk) {
-                  response += chunk.tools.messages[0].content + "\n";
-              }
-          }
-          return response.trim();
-      } catch (error) {
-          console.error("Error processing stream:", error);
-          throw error;
+  private async processAgentStream(
+    stream: AsyncIterable<any>
+  ): Promise<string> {
+    let response = "";
+    try {
+      for await (const chunk of stream) {
+        if ("agent" in chunk) {
+          response += chunk.agent.messages[0].content + "\n";
+        } else if ("tools" in chunk) {
+          response += chunk.tools.messages[0].content + "\n";
+        }
       }
+      return response.trim();
+    } catch (error) {
+      console.error("Error processing stream:", error);
+      throw error;
+    }
   }
 
   private async handleImplicitActions(userMessage: string, agentResponse: string) {
-      try {
-          const intent = await this.agent.invoke(
-              `Analyze this message and identify the user's intent: ${userMessage}`
-          );
+    try {
+      // Use a more structured intent analysis
+      const intent = await this.agent.invoke(`Analyze this message and identify the user's intent: ${userMessage}`);
 
-          if (intent.includes('create_wallet') && !this.currentThread) {
-              const wallet = await this.walletManager.createWallet();
-              this.currentThread = wallet.userId;
-              this.emit('walletCreated', wallet);
-          }
-
-          if (intent.includes('deposit')) {
-              await this.startDepositMonitoring(this.currentThread!);
-          }
-
-          if (intent.includes('analyze_markets')) {
-              const analysis = await this.analyzeMarkets();
-              this.emit('marketAnalysis', analysis);
-          }
-
-          if (intent.includes('check_position') || intent.includes('balance')) {
-              const status = await this.checkWalletStatus(this.currentThread!);
-              this.emit('walletStatus', status);
-          }
-      } catch (error) {
-          console.error("Error handling implicit actions:", error);
-      }
-  }
-
-  private async startMonitoring() {
-      // Clear any existing intervals
-      if (this.monitoringInterval) {
-          clearInterval(this.monitoringInterval);
+      if (intent.includes("create_wallet") && !this.currentThread) {
+        const wallet = await this.walletManager.createWallet();
+        this.currentThread = wallet.userId;
+        this.emit("walletCreated", wallet);
       }
 
-      this.monitoringInterval = setInterval(
-          async () => {
-              try {
-                  await this.monitorWallets();
-              } catch (error) {
-                  console.error("Error in monitoring cycle:", error);
-              }
-          },
-          5 * 60 * 1000
-      );
-  }
-
-  private async startOptimization() {
-      if (this.optimizationInterval) {
-          clearInterval(this.optimizationInterval);
+      if (intent.includes("analyze_markets")) {
+        const analysis = await this.analyzeAllMarkets();
+        this.emit("marketAnalysis", analysis);
       }
 
-      this.optimizationInterval = setInterval(
-          async () => {
-              try {
-                  await this.optimizePositions();
-              } catch (error) {
-                  console.error("Error in optimization cycle:", error);
-              }
-          },
-          10 * 60 * 1000
-      );
+      // Add missing implementations
+      if (intent.includes("check_positions") && this.currentThread) {
+        const status = await this.checkWalletStatus(this.currentThread);
+        if (status.portfolio) {
+          this.emit("portfolioUpdate", status.portfolio);
+        }
+      }
+
+      if (intent.includes("optimize") && this.currentThread) {
+        await this.optimizePositions([this.currentThread]);
+      }
+
+      if (intent.includes("deposit") && this.currentThread) {
+        await this.startDepositMonitoring(this.currentThread);
+      }
+
+      if (intent.includes("balance") && this.currentThread) {
+        const status = await this.checkWalletStatus(this.currentThread);
+        this.emit("balanceUpdate", status);
+      }
+
+    } catch (error) {
+      console.error("Error handling implicit actions:", error);
+      this.emit("error", { type: "implicit_action", error });
+    }
   }
 
   private async startDepositMonitoring(userId: string) {
-      // Clear existing monitoring for this user
-      if (this.depositMonitoringIntervals.has(userId)) {
-          clearInterval(this.depositMonitoringIntervals.get(userId));
-      }
+    if (!userId) return;
 
-      const interval = setInterval(async () => {
-          try {
-              const status = await this.checkDepositStatus(userId);
-              if (status.hasNewDeposit) {
-                  clearInterval(interval);
-                  this.depositMonitoringIntervals.delete(userId);
-                  this.emit('depositDetected', {
-                      userId,
-                      amount: status.amount,
-                      token: status.token
-                  });
-                  
-                  // Start optimization for the new deposit
-                  await this.optimizePositions([userId]);
-              }
-          } catch (error) {
-              console.error("Error checking deposits:", error);
-          }
-      }, 30000); // Check every 30 seconds
+    // Clear existing monitoring for this user
+    if (this.depositMonitoringIntervals.has(userId)) {
+      clearInterval(this.depositMonitoringIntervals.get(userId));
+    }
 
-      this.depositMonitoringIntervals.set(userId, interval);
-  }
-
-  private async monitorWallets() {
-      if (!this.isRunning) return;
-
+    const interval = setInterval(async () => {
       try {
-          const wallets = this.walletManager.getAllWallets();
-          for (const [userId, wallet] of wallets) {
-              const status = await this.checkWalletStatus(userId);
-              if (status.needsAttention) {
-                  this.emit('alert', {
-                      userId,
-                      type: status.alertType,
-                      message: status.message
-                  });
-              }
-          }
-      } catch (error) {
-          console.error("Error in wallet monitoring:", error);
-          this.emit('error', {
-              type: 'monitoring',
-              error
+        const status = await this.checkDepositStatus(userId);
+        if (status.hasNewDeposit) {
+          clearInterval(interval);
+          this.depositMonitoringIntervals.delete(userId);
+
+          this.emit("depositDetected", {
+            userId,
+            amount: status.amount,
+            token: status.token,
           });
-      }
-  }
 
-  private async checkWalletStatus(userId: string): Promise<WalletStatus> {
-      try {
-          const wallet = await this.walletManager.getWallet(userId);
-          if (!wallet) {
-              return {
-                  needsAttention: true,
-                  alertType: 'error',
-                  message: 'Wallet not found'
-              };
-          }
-
-          const position = await this.agent.invoke("check_position", { userId });
-          const status: WalletStatus = {
-              needsAttention: false,
-              alertType: 'info',
-              message: 'Wallet healthy',
-              position: position
-          };
-
-          // Check health factor
-          if (position && position.healthFactor < 1.05) {
-              status.needsAttention = true;
-              status.alertType = 'warning';
-              status.message = `Low health factor: ${position.healthFactor}`;
-          }
-
-          return status;
+          // Start optimization for the new deposit
+          await this.optimizePositions([userId]);
+        }
       } catch (error) {
-          console.error("Error checking wallet status:", error);
-          return {
-              needsAttention: true,
-              alertType: 'error',
-              message: 'Error checking wallet status'
-          };
+        console.error("Error checking deposits:", error);
       }
+    }, 30000); // Check every 30 seconds
+
+    this.depositMonitoringIntervals.set(userId, interval);
   }
 
   private async checkDepositStatus(userId: string): Promise<DepositStatus> {
-      try {
-          const wallet = await this.walletManager.getWallet(userId);
-          if (!wallet) throw new Error("Wallet not found");
+    try {
+      const wallet = await this.walletManager.getWallet(userId);
+      if (!wallet) throw new Error("Wallet not found");
 
-          const balance = await this.agent.invoke("get_balance", { userId });
-          const previousBalance = this.lastKnownBalances.get(userId) || '0';
+      // Check balances in both protocols
+      const [morphoBalance, aaveBalance] = await Promise.all([
+        this.agent
+          .invoke("morpho_market_action", {
+            action: "balance",
+            userId,
+          })
+          .catch(() => "0"),
+        this.agent
+          .invoke("aave_market_action", {
+            action: "balance",
+            userId,
+          })
+          .catch(() => "0"),
+      ]);
 
-          if (BigInt(balance) > BigInt(previousBalance)) {
-              this.lastKnownBalances.set(userId, balance);
-              return {
-                  hasNewDeposit: true,
-                  amount: (BigInt(balance) - BigInt(previousBalance)).toString(),
-                  token: 'USDC' // Assuming USDC for now
-              };
-          }
+      const totalBalance =
+        BigInt(morphoBalance || "0") + BigInt(aaveBalance || "0");
+      const previousBalance = BigInt(this.lastKnownBalances.get(userId) || "0");
 
-          return {
-              hasNewDeposit: false,
-              amount: '0'
-          };
-      } catch (error) {
-          console.error("Error checking deposit status:", error);
-          return {
-              hasNewDeposit: false,
-              amount: '0'
-          };
+      if (totalBalance > previousBalance) {
+        this.lastKnownBalances.set(userId, totalBalance.toString());
+        return {
+          hasNewDeposit: true,
+          amount: (totalBalance - previousBalance).toString(),
+          token: "USDC", // Assuming USDC for now
+        };
       }
+
+      return {
+        hasNewDeposit: false,
+        amount: "0",
+      };
+    } catch (error) {
+      console.error("Error checking deposit status:", error);
+      return {
+        hasNewDeposit: false,
+        amount: "0",
+      };
+    }
   }
 
-  private async analyzeMarkets(): Promise<MarketAnalysis[]> {
+  private async getTokenBalance(
+    userId: string,
+    tokenAddress: string,
+    protocol: Protocol
+  ): Promise<bigint> {
+    try {
+      const result = await this.agent.invoke(`${protocol}_market_action`, {
+        action: "balance",
+        userId,
+        token: tokenAddress,
+      });
+
+      return BigInt(result || "0");
+    } catch {
+      return BigInt(0);
+    }
+  }
+
+  private async analyzeAllMarkets(): Promise<MultiProtocolAnalysis[]> {
+    const results: MultiProtocolAnalysis[] = [];
+
+    // Analyze Morpho markets
+    try {
+      const morphoAnalysis = await this.agent.invoke("morpho_market_action", {
+        action: "analyze",
+      });
+      results.push({
+        timestamp: new Date().toISOString(),
+        protocol: Protocol.MORPHO,
+        markets: JSON.parse(morphoAnalysis),
+      });
+    } catch (error) {
+      console.error("Error analyzing Morpho markets:", error);
+    }
+
+    // Analyze Aave markets
+    try {
+      const aaveAnalysis = await this.agent.invoke("aave_market_action", {
+        action: "analyze",
+      });
+      results.push({
+        timestamp: new Date().toISOString(),
+        protocol: Protocol.AAVE,
+        markets: JSON.parse(aaveAnalysis),
+      });
+    } catch (error) {
+      console.error("Error analyzing Aave markets:", error);
+    }
+
+    return results;
+  }
+
+  private async startMonitoring() {
+    if (this.monitoringInterval) {
+      clearInterval(this.monitoringInterval);
+    }
+
+    this.monitoringInterval = setInterval(async () => {
       try {
-          // Check cache first
-          const now = Date.now();
-          const cachedAnalysis = Array.from(this.marketCache.values())
-              .filter(entry => (now - entry.timestamp) < this.MARKET_CACHE_TTL)
-              .map(entry => entry.data);
-
-          if (cachedAnalysis.length > 0) {
-              return cachedAnalysis;
-          }
-
-          // If no cache, fetch new data
-          const markets = await this.agent.invoke("analyze_markets");
-          
-          // Update cache
-          markets.forEach((market: MarketAnalysis) => {
-              this.marketCache.set(market.marketId, {
-                  data: market,
-                  timestamp: now
-              });
-          });
-
-          return markets;
+        await this.monitorWallets();
       } catch (error) {
-          console.error("Error analyzing markets:", error);
-          throw error;
+        console.error("Error in monitoring cycle:", error);
       }
+    }, 5 * 60 * 1000);
+  }
+
+  private async monitorWallets() {
+    if (!this.isRunning) return;
+
+    try {
+      const wallets = this.walletManager.getAllWallets();
+      for (const [userId, wallet] of wallets) {
+        const status = await this.checkWalletStatus(userId);
+        if (status.needsAttention) {
+          this.emit("alert", {
+            userId,
+            type: status.alertType,
+            message: status.message,
+            data: status.portfolio,
+          });
+        }
+      }
+    } catch (error) {
+      console.error("Error in wallet monitoring:", error);
+      this.emit("error", { type: "monitoring", error });
+    }
+  }
+
+  private async checkWalletStatus(userId: string): Promise<WalletStatus> {
+    try {
+      const wallet = await this.walletManager.getWallet(userId);
+      if (!wallet) {
+        return {
+          needsAttention: true,
+          alertType: AlertType.ERROR,
+          message: "Wallet not found",
+        };
+      }
+
+      // Check positions in all protocols
+      const [morphoPositions, aavePositions] = await Promise.all([
+        this.agent
+          .invoke("morpho_market_action", {
+            action: "check_position",
+            userId,
+          })
+          .then((res: any) => JSON.parse(res))
+          .catch(() => null),
+        this.agent
+          .invoke("aave_market_action", {
+            action: "check_position",
+            userId,
+          })
+          .then((res: any) => JSON.parse(res))
+          .catch(() => null),
+      ]);
+
+      if (!morphoPositions && !aavePositions) {
+        return {
+          needsAttention: false,
+          alertType: AlertType.INFO,
+          message: "No active positions found",
+        };
+      }
+
+      // Calculate total portfolio metrics
+      const portfolio = this.calculatePortfolioMetrics(
+        morphoPositions,
+        aavePositions
+      );
+
+      // Check health factors
+      if (portfolio.healthFactor < 1.05) {
+        return {
+          needsAttention: true,
+          alertType: AlertType.WARNING,
+          message: `Low health factor: ${portfolio.healthFactor}`,
+          portfolio,
+        };
+      }
+
+      return {
+        needsAttention: false,
+        alertType: AlertType.INFO,
+        message: "Positions healthy",
+        portfolio,
+      };
+    } catch (error) {
+      console.error("Error checking wallet status:", error);
+      return {
+        needsAttention: true,
+        alertType: AlertType.ERROR,
+        message: "Error checking wallet status",
+      };
+    }
+  }
+
+  private calculatePortfolioMetrics(morphoPositions: any, aavePositions: any) {
+    let totalSupplyUSD = 0;
+    let totalBorrowUSD = 0;
+    let minHealthFactor = Infinity;
+    let netAPY = 0;
+    const positions: Position[] = [];
+
+    // Process Morpho positions
+    if (morphoPositions?.positions) {
+      morphoPositions.positions.forEach((pos: any) => {
+        positions.push({
+          protocol: Protocol.MORPHO,
+          ...pos,
+        });
+        minHealthFactor = Math.min(minHealthFactor, pos.healthFactor);
+        netAPY += pos.metrics.supplyAPY * Number(pos.supplyAmount);
+        totalSupplyUSD += Number(pos.supplyAmount);
+      });
+    }
+
+    // Process Aave positions
+    if (aavePositions?.positions) {
+      aavePositions.positions.forEach((pos: any) => {
+        positions.push({
+          protocol: Protocol.AAVE,
+          ...pos,
+        });
+        minHealthFactor = Math.min(minHealthFactor, pos.healthFactor);
+        netAPY += pos.metrics.supplyAPY * Number(pos.supplyAmount);
+        totalSupplyUSD += Number(pos.supplyAmount);
+      });
+    }
+
+    return {
+      totalSupplyUSD: totalSupplyUSD.toString(),
+      totalBorrowUSD: totalBorrowUSD.toString(),
+      healthFactor: minHealthFactor === Infinity ? 0 : minHealthFactor,
+      netAPY: totalSupplyUSD > 0 ? netAPY / totalSupplyUSD : 0,
+      positions,
+    };
+  }
+
+  private async startOptimization() {
+    if (this.optimizationInterval) {
+      clearInterval(this.optimizationInterval);
+    }
+
+    this.optimizationInterval = setInterval(async () => {
+      try {
+        await this.optimizePositions();
+      } catch (error) {
+        console.error("Error in optimization cycle:", error);
+      }
+    }, 10 * 60 * 1000);
   }
 
   private async optimizePositions(specificUsers?: string[]) {
-      try {
-          const wallets = this.walletManager.getAllWallets();
-          const usersToCheck = specificUsers || Array.from(wallets.keys());
+    try {
+      const wallets = this.walletManager.getAllWallets();
+      const usersToCheck = specificUsers || Array.from(wallets.keys());
+      const marketAnalysis = await this.analyzeAllMarkets();
 
-          for (const userId of usersToCheck) {
-              const result = await this.optimizeUserPosition(userId.toString());
-              if (result.isProfit) {
-                  this.emit('optimizationFound', result);
-              }
+      for (const userId of usersToCheck) {
+        const status = await this.checkWalletStatus(userId.toString());
+        if (!status.portfolio) continue;
+
+        for (const position of status.portfolio.positions) {
+          const opportunity = await this.findBestOpportunity(
+            position,
+            marketAnalysis
+          );
+
+          if (opportunity && opportunity.isProfit) {
+            this.emit("optimizationFound", opportunity);
+            const success = await this.executeRebalancing(
+              userId.toString(),
+              opportunity
+            );
+            if (success) {
+              this.emit("optimizationExecuted", opportunity);
+            }
           }
-      } catch (error) {
-          console.error("Error in optimization:", error);
+        }
       }
+    } catch (error) {
+      console.error("Error in optimization:", error);
+    }
   }
 
-  private async optimizeUserPosition(userId: string): Promise<OptimizationResult> {
+  private async findBestOpportunity(
+    currentPosition: Position,
+    marketAnalysis: MultiProtocolAnalysis[]
+  ): Promise<OptimizationResult | null> {
     try {
-        const currentPosition = await this.agent.invoke("check_position", { userId });
-        if (!currentPosition || !currentPosition.position) {
-            return {
-                userId,
-                isProfit: false,
-                potentialApy: 0,
-                gasCost: '0'
-            };
+      let bestOpportunity: MarketData | null = null;
+      let highestAPY = currentPosition.metrics.supplyAPY;
+
+      // Check all protocols for better opportunities
+      for (const analysis of marketAnalysis) {
+        for (const market of analysis.markets) {
+          if (
+            !market.risk.isHealthy ||
+            market.risk.utilizationRisk === "HIGH"
+          ) {
+            continue;
+          }
+
+          const totalAPY = market.apy.supply + (market.apy.rewards || 0);
+          if (totalAPY > highestAPY) {
+            bestOpportunity = market;
+            highestAPY = totalAPY;
+          }
         }
+      }
 
-        // Get all market data
-        const markets = await this.analyzeMarkets();
-        
-        // Find current market data
-        const currentMarket = markets.find(m => m.marketId === currentPosition.position.marketId);
-        if (!currentMarket) {
-            throw new Error('Current market not found');
-        }
+      if (!bestOpportunity) return null;
 
-        // Find best market
-        const bestMarket = markets.reduce((best, market) => {
-            if (market.marketId === currentMarket.marketId) return best;
-            if (!market.isHealthy || market.riskLevel === 'HIGH') return best;
-            if (market.apy <= best.apy) return best;
-            return market;
-        }, currentMarket);
+      // Calculate gas costs and profitability
+      const gasEstimate = await this.estimateRebalancingGas(
+        currentPosition,
+        bestOpportunity
+      );
 
-        // Calculate potential profit
-        const apyDifference = bestMarket.apy - currentMarket.apy;
-        if (apyDifference < CONFIG.YIELD_MANAGER.minimumAPYDifference) {
-            return {
-                userId,
-                currentMarket: currentMarket.marketId,
-                suggestedMarket: bestMarket.marketId,
-                potentialApy: apyDifference,
-                isProfit: false,
-                gasCost: '0'
-            };
-        }
+      const monthlyProfit = this.calculateMonthlyProfit(
+        currentPosition.supplyAmount,
+        currentPosition.metrics.supplyAPY,
+        highestAPY
+      );
 
-        // Simulate rebalancing to calculate gas costs
-        const simulation = await this.agent.invoke("simulate_rebalance", {
-            userId,
-            currentMarketId: currentPosition.position.marketId,
-            suggestedMarketId: bestMarket.marketId,
-            supplyAmount: currentPosition.position.supplyAmount
-        });
+      const isProfitable = monthlyProfit > Number(gasEstimate) * 3; // 3-month payback period
 
-        // Calculate if profitable considering gas costs
-        const positionValue = BigInt(currentPosition.position.supplyAmount);
-        const yearlyProfit = (positionValue * BigInt(Math.floor(apyDifference * 100))) / BigInt(10000);
-        const monthlyProfit = yearlyProfit / BigInt(12);
-        const gasCostBigInt = BigInt(simulation.gasCost || 0);
-
-        const isProfitable = monthlyProfit > gasCostBigInt * BigInt(3); // 3-month payback period
-
-        return {
-            userId,
-            currentMarket: currentMarket.marketId,
-            suggestedMarket: bestMarket.marketId,
-            potentialApy: apyDifference,
-            isProfit: isProfitable,
-            gasCost: simulation.gasCost
-        };
+      return {
+        userId: currentPosition.marketId, // Using marketId as userId here
+        currentPosition: {
+          protocol: currentPosition.protocol,
+          marketId: currentPosition.marketId,
+          position: currentPosition,
+          healthFactor: currentPosition.healthFactor,
+        },
+        suggestedMarket: bestOpportunity,
+        potentialApy: highestAPY,
+        gasCost: gasEstimate.toString(),
+        isProfit: isProfitable,
+      };
     } catch (error) {
-        console.error('Error optimizing position:', error);
-        return {
-            userId,
-            isProfit: false,
-            potentialApy: 0,
-            gasCost: '0'
-        };
+      console.error("Error finding opportunities:", error);
+      return null;
     }
-}
+  }
 
-private async executeOptimization(optimization: OptimizationResult) {
-    if (!optimization.isProfit || !optimization.currentMarket || !optimization.suggestedMarket) {
-        return false;
+  private async estimateRebalancingGas(
+    currentPosition: Position,
+    targetMarket: MarketData
+  ): Promise<bigint> {
+    try {
+      // Estimate withdraw gas
+      const withdrawGas = await this.agent
+        .invoke(`${currentPosition.protocol}_market_action`, {
+          action: "withdraw",
+          marketId: currentPosition.marketId,
+          amount: currentPosition.supplyAmount,
+          simulate: true,
+        })
+        .then((res: any) => BigInt(JSON.parse(res).gasEstimate || 0));
+
+      // Estimate supply gas
+      const supplyGas = await this.agent
+        .invoke(`${targetMarket.protocol}_market_action`, {
+          action: "supply",
+          marketId: targetMarket.marketId,
+          amount: currentPosition.supplyAmount,
+          simulate: true,
+        })
+        .then((res: any) => BigInt(JSON.parse(res).gasEstimate || 0));
+
+      return withdrawGas + supplyGas;
+    } catch (error) {
+      console.error("Error estimating gas:", error);
+      return BigInt(0);
+    }
+  }
+
+  private calculateMonthlyProfit(
+    amount: string,
+    currentAPY: number,
+    newAPY: number
+  ): number {
+    const apyDifference = newAPY - currentAPY;
+    return (Number(amount) * apyDifference) / 12;
+  }
+
+  private async executeRebalancing(
+    userId: string,
+    optimization: OptimizationResult
+  ): Promise<boolean> {
+    if (
+      !optimization.isProfit ||
+      !optimization.currentPosition ||
+      !optimization.suggestedMarket
+    ) {
+      return false;
     }
 
     try {
-        // Get current position
-        const position = await this.agent.invoke("check_position", { userId: optimization.userId });
-        if (!position || !position.position) {
-            throw new Error('Position not found');
+      const currentPos = optimization.currentPosition;
+      const targetMarket = optimization.suggestedMarket;
+
+      // Execute withdrawal
+      const withdrawResult = await this.agent.invoke(
+        `${currentPos.protocol}_market_action`,
+        {
+          action: "withdraw",
+          userId,
+          marketId: currentPos.marketId,
+          amount: currentPos.position.supplyAmount,
         }
+      );
 
-        // Execute withdrawal
-        const withdrawResult = await this.agent.invoke("execute_withdraw", {
-            userId: optimization.userId,
-            marketId: optimization.currentMarket,
-            amount: position.position.supplyAmount
-        });
+      if (!JSON.parse(withdrawResult).success) {
+        throw new Error("Withdrawal failed");
+      }
 
-        if (!withdrawResult.success) {
-            throw new Error('Withdrawal failed: ' + withdrawResult.error);
+      // Execute supply
+      const supplyResult = await this.agent.invoke(
+        `${targetMarket.protocol}_market_action`,
+        {
+          action: "supply",
+          userId,
+          marketId: targetMarket.marketId,
+          amount: currentPos.position.supplyAmount,
         }
+      );
 
-        // Execute supply to new market
-        const supplyResult = await this.agent.invoke("execute_supply", {
-            userId: optimization.userId,
-            marketId: optimization.suggestedMarket,
-            amount: position.position.supplyAmount
-        });
+      if (!JSON.parse(supplyResult).success) {
+        throw new Error("Supply failed");
+      }
 
-        if (!supplyResult.success) {
-            throw new Error('Supply failed: ' + supplyResult.error);
-        }
-
-        this.emit('optimizationExecuted', {
-            userId: optimization.userId,
-            from: optimization.currentMarket,
-            to: optimization.suggestedMarket,
-            amount: position.position.supplyAmount,
-            apyImprovement: optimization.potentialApy
-        });
-
-        return true;
+      return true;
     } catch (error) {
-        console.error('Error executing optimization:', error);
-        this.emit('error', {
-            type: 'optimization',
-            userId: optimization.userId,
-            error
-        });
-        return false;
+      console.error("Error executing rebalancing:", error);
+      this.emit("error", {
+        type: "rebalancing",
+        userId,
+        error,
+      });
+      return false;
     }
-}
+  }
 
-async start() {
+  async start() {
     try {
-        const initialized = await this.initialize();
-        if (!initialized) {
-            throw new Error("Failed to initialize agent");
-        }
+      const initialized = await this.initialize();
+      if (!initialized) {
+        throw new Error("Failed to initialize agent");
+      }
 
-        this.emit('started');
-        return true;
+      this.emit("started");
+      return true;
     } catch (error) {
-        console.error("Error starting agent:", error);
-        this.emit('error', { type: 'startup', error });
-        return false;
+      console.error("Error starting agent:", error);
+      this.emit("error", { type: "startup", error });
+      return false;
     }
-}
+  }
 
-async stop() {
+  async stop() {
     try {
-        this.isRunning = false;
+      this.isRunning = false;
 
-        // Clear all intervals
-        if (this.monitoringInterval) {
-            clearInterval(this.monitoringInterval);
-        }
-        if (this.optimizationInterval) {
-            clearInterval(this.optimizationInterval);
-        }
-        for (const interval of this.depositMonitoringIntervals.values()) {
-            clearInterval(interval);
-        }
-        this.depositMonitoringIntervals.clear();
+      if (this.monitoringInterval) {
+        clearInterval(this.monitoringInterval);
+      }
+      if (this.optimizationInterval) {
+        clearInterval(this.optimizationInterval);
+      }
+      for (const interval of this.depositMonitoringIntervals.values()) {
+        clearInterval(interval);
+      }
+      this.depositMonitoringIntervals.clear();
 
-        // Clear caches
-        this.marketCache.clear();
-        this.lastKnownBalances.clear();
+      this.marketCache.clear();
+      this.lastKnownBalances.clear();
 
-        // Stop wallet manager
-        await this.walletManager.stop();
+      await this.walletManager.stop();
 
-        this.emit('stopped');
-        return true;
+      this.emit("stopped");
+      return true;
     } catch (error) {
-        console.error("Error stopping agent:", error);
-        this.emit('error', { type: 'shutdown', error });
-        return false;
+      console.error("Error stopping agent:", error);
+      this.emit("error", { type: "shutdown", error });
+      return false;
     }
-}
+  }
 }

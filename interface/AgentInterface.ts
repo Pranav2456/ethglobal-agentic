@@ -81,10 +81,10 @@ export class AgentInterface extends EventEmitter {
 
     private displayWelcomeMessage() {
         console.clear();
-        console.log(chalk.blue.bold('\n🤖 Welcome to Morpho Yield Maximizer!\n'));
+        console.log(chalk.blue.bold('\n🤖 Welcome to Base Yield Maximizer!\n'));
         console.log(chalk.yellow('I\'m your personal DeFi assistant. I can help you:'));
         console.log('1. Set up and manage your wallet');
-        console.log('2. Find the best yields in Morpho markets');
+        console.log('2. Find the best yields in Base DeFi markets');
         console.log('3. Automatically optimize your positions');
         console.log('4. Monitor market conditions and risks\n');
         console.log(chalk.gray('Just tell me what you\'d like to do in natural language.'));

@@ -1,3 +1,4 @@
+// src/AutonomousAgent.ts
 import {
   AgentKit,
   walletActionProvider,
@@ -19,7 +20,6 @@ import {
   MarketData,
   Position,
   WalletStatus,
-  DepositStatus,
   OptimizationResult,
   AlertType,
   MultiProtocolAnalysis,
@@ -30,16 +30,13 @@ export class AutonomousAgent extends EventEmitter {
   private walletManager: WalletManager;
   private agentKit: AgentKit | null = null;
   private agent: any;
+  private agentConfig: any;
   private isRunning: boolean = false;
-  private currentThread: string | null = null;
   private memory: MemorySaver;
   private monitoringInterval?: NodeJS.Timeout;
   private optimizationInterval?: NodeJS.Timeout;
-  private depositMonitoringIntervals: Map<string, NodeJS.Timeout> = new Map();
-  private lastKnownBalances: Map<string, string> = new Map();
-  private marketCache: Map<string, { data: MarketData; timestamp: number }> =
-    new Map();
-  private readonly MARKET_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+  private marketCache = new Map<string, any>();
+  private readonly THREAD_ID: string = Date.now().toString();
 
   constructor() {
     super();
@@ -54,26 +51,22 @@ export class AutonomousAgent extends EventEmitter {
         temperature: 0.7,
       });
 
-      const provider = await CdpWalletProvider.configureWithWallet({
-        apiKeyName: process.env.CDP_API_KEY_NAME!,
-        apiKeyPrivateKey: process.env.CDP_API_KEY_PRIVATE_KEY!.replace(
-          /\\n/g,
-          "\n"
-        ),
-        networkId: CONFIG.NETWORK.id,
-      });
+      // Attempt to load the wallet; if not present, create one.
+      let wallet = await this.walletManager.getWallet().catch(() => null);
+      if (!wallet) {
+        const created = await this.walletManager.createWallet();
+        console.log("Wallet created:", created.address);
+        wallet = await this.walletManager.getWallet();
+      }
 
       this.agentKit = await AgentKit.from({
-        walletProvider: provider,
+        walletProvider: wallet,
         actionProviders: [
           walletActionProvider(),
           erc20ActionProvider(),
           cdpApiActionProvider({
             apiKeyName: process.env.CDP_API_KEY_NAME!,
-            apiKeyPrivateKey: process.env.CDP_API_KEY_PRIVATE_KEY!.replace(
-              /\\n/g,
-              "\n"
-            ),
+            apiKeyPrivateKey: process.env.CDP_API_KEY_PRIVATE_KEY!.replace(/\\n/g, "\n"),
           }),
           morphoProvider,
           aaveProvider,
@@ -81,6 +74,11 @@ export class AutonomousAgent extends EventEmitter {
       });
 
       const tools = await getLangChainTools(this.agentKit);
+      this.agentConfig = {
+        configurable: {
+          thread_id: this.THREAD_ID,
+        },
+      };
 
       this.agent = createReactAgent({
         llm,
@@ -104,71 +102,53 @@ export class AutonomousAgent extends EventEmitter {
 
   private getAgentPrompt(): string {
     return `You are a DeFi assistant specializing in yield optimization across multiple protocols.
-      Your goal is to help users maximize their returns while maintaining safety.
-      
-      Available Protocols:
-      - Morpho: Advanced lending protocol with optimal rates
-      - Aave: Leading lending protocol with deep liquidity
-      
-      Core Actions:
-      1. Wallet Management
-      - Create CDP wallets for users
-      - Monitor wallet balances and activities
-      - Execute wallet-related commands directly
-      
-      2. Market Analysis
-      - Track real-time APY rates
-      - Monitor risk factors
-      - Analyze liquidity levels
-      
-      3. Portfolio Management
-      - Track positions across protocols
-      - Monitor health factors
-      - Calculate total returns
-      
-      4. Yield Optimization
-      - Find best yields
-      - Calculate profitability
-      - Execute rebalancing
-      
-      When interacting:
-      - Be direct and action-oriented
-      - Execute requested actions immediately
-      - For wallet creation, use the CDP wallet system directly
-      - Provide clear confirmation of actions taken
-      
-      Remember: You can create wallets and execute actions directly. Don't just provide information - take action when requested.`;
+Your goal is to help users maximize their returns while maintaining safety.
+
+Available Protocols:
+- Morpho: Advanced lending protocol with optimal rates
+- Aave: Leading lending protocol with deep liquidity
+
+Core Actions:
+1. Wallet Management
+- Monitor wallet balances and activities
+- Execute wallet-related commands directly
+
+2. Market Analysis
+- Track real-time APY rates
+- Monitor risk factors
+- Analyze liquidity levels
+
+3. Portfolio Management
+- Track positions across protocols
+- Monitor health factors
+- Calculate total returns
+
+4. Yield Optimization
+- Find best yields
+- Calculate profitability
+- Execute rebalancing
+
+When interacting:
+- Be direct and action-oriented
+- Execute requested actions immediately
+
+Remember: You can execute actions directly. Don't just provide information - take action when requested.`;
   }
 
   async processUserMessage(message: string): Promise<string> {
     if (!this.isRunning || !this.agent) {
       return "I'm still initializing. Please try again in a moment.";
     }
-
     try {
-      // Ensure we have a thread ID
-      if (!this.currentThread) {
-        this.currentThread = Date.now().toString();
-      }
-
-      const config = {
-        configurable: {
-          thread_id: this.currentThread,
-        },
-      };
-
       const stream = await this.agent.stream(
         {
           messages: [
-            new SystemMessage(
-              "Remember to maintain a natural, helpful conversation."
-            ),
+            new SystemMessage("Maintain a natural, helpful conversation."),
             new HumanMessage(message),
           ],
         },
-        config
+        this.agentConfig
       );
-
       const response = await this.processAgentStream(stream);
       await this.handleImplicitActions(message, response);
       return response;
@@ -178,9 +158,7 @@ export class AutonomousAgent extends EventEmitter {
     }
   }
 
-  private async processAgentStream(
-    stream: AsyncIterable<any>
-  ): Promise<string> {
+  private async processAgentStream(stream: AsyncIterable<any>): Promise<string> {
     let response = "";
     try {
       for await (const chunk of stream) {
@@ -199,68 +177,29 @@ export class AutonomousAgent extends EventEmitter {
 
   private async handleImplicitActions(userMessage: string, agentResponse: string) {
     try {
-      // Simple intent detection
       const message = userMessage.toLowerCase();
       const intents = {
-        create_wallet: message.includes("create wallet") || 
-                      message.includes("new wallet") || 
-                      message.includes("setup wallet"),
-        deposit: message.includes("deposit") || message.includes("send"),
-        analyze: message.includes("analyze") || 
-                 message.includes("check markets") || 
-                 message.includes("show markets"),
-        position: message.includes("position") || 
-                  message.includes("balance") || 
-                  message.includes("portfolio"),
-        optimize: message.includes("optimize") || 
-                  message.includes("yield") || 
-                  message.includes("apy")
+        analyze: message.includes("analyze") || message.includes("check markets"),
+        position:
+          message.includes("position") ||
+          message.includes("balance") ||
+          message.includes("portfolio"),
+        optimize:
+          message.includes("optimize") ||
+          message.includes("yield") ||
+          message.includes("apy"),
       };
-  
-      // Handle wallet creation first
-      if (intents.create_wallet) {
-        try {
-          const wallet = await this.walletManager.createWallet();
-          this.currentThread = wallet.userId;
-          this.emit("walletCreated", wallet);
-          return; // Return early after wallet creation
-        } catch (error) {
-          console.error("Error creating wallet:", error);
-          this.emit("error", { type: "wallet_creation", error });
-          return;
-        }
+
+      if (intents.analyze) {
+        const analysis = await this.analyzeAllMarkets();
+        this.emit("marketAnalysis", analysis);
       }
-  
-      // Only proceed with other actions if we have a wallet
-      if (this.currentThread) {
-        const promises = [];
-  
-        if (intents.deposit) {
-          promises.push(this.startDepositMonitoring(this.currentThread));
-        }
-  
-        if (intents.analyze) {
-          promises.push(
-            this.analyzeAllMarkets()
-              .then(analysis => this.emit("marketAnalysis", analysis))
-          );
-        }
-  
-        if (intents.position) {
-          promises.push(
-            this.checkWalletStatus(this.currentThread)
-              .then(status => this.emit("walletStatus", status))
-          );
-        }
-  
-        if (intents.optimize) {
-          promises.push(this.optimizePositions([this.currentThread]));
-        }
-  
-        // Execute all actions in parallel if there are any
-        if (promises.length > 0) {
-          await Promise.all(promises);
-        }
+      if (intents.position) {
+        const status = await this.checkWalletStatus();
+        this.emit("walletStatus", status);
+      }
+      if (intents.optimize) {
+        await this.optimizePositions();
       }
     } catch (error) {
       console.error("Error handling implicit actions:", error);
@@ -268,134 +207,46 @@ export class AutonomousAgent extends EventEmitter {
     }
   }
 
-  private async startDepositMonitoring(userId: string) {
-    if (!userId) return;
-
-    // Clear existing monitoring for this user
-    if (this.depositMonitoringIntervals.has(userId)) {
-      clearInterval(this.depositMonitoringIntervals.get(userId));
-    }
-
-    const interval = setInterval(async () => {
-      try {
-        const status = await this.checkDepositStatus(userId);
-        if (status.hasNewDeposit) {
-          clearInterval(interval);
-          this.depositMonitoringIntervals.delete(userId);
-
-          this.emit("depositDetected", {
-            userId,
-            amount: status.amount,
-            token: status.token,
-          });
-
-          // Start optimization for the new deposit
-          await this.optimizePositions([userId]);
-        }
-      } catch (error) {
-        console.error("Error checking deposits:", error);
-      }
-    }, 30000); // Check every 30 seconds
-
-    this.depositMonitoringIntervals.set(userId, interval);
-  }
-
-  private async checkDepositStatus(userId: string): Promise<DepositStatus> {
-    try {
-      const wallet = await this.walletManager.getWallet(userId);
-      if (!wallet) throw new Error("Wallet not found");
-
-      // Check balances in both protocols
-      const [morphoBalance, aaveBalance] = await Promise.all([
-        this.agent
-          .invoke("morpho_market_action", {
-            action: "balance",
-            userId,
-          })
-          .catch(() => "0"),
-        this.agent
-          .invoke("aave_market_action", {
-            action: "balance",
-            userId,
-          })
-          .catch(() => "0"),
-      ]);
-
-      const totalBalance =
-        BigInt(morphoBalance || "0") + BigInt(aaveBalance || "0");
-      const previousBalance = BigInt(this.lastKnownBalances.get(userId) || "0");
-
-      if (totalBalance > previousBalance) {
-        this.lastKnownBalances.set(userId, totalBalance.toString());
-        return {
-          hasNewDeposit: true,
-          amount: (totalBalance - previousBalance).toString(),
-          token: "USDC", // Assuming USDC for now
-        };
-      }
-
-      return {
-        hasNewDeposit: false,
-        amount: "0",
-      };
-    } catch (error) {
-      console.error("Error checking deposit status:", error);
-      return {
-        hasNewDeposit: false,
-        amount: "0",
-      };
-    }
-  }
-
-  private async getTokenBalance(
-    userId: string,
-    tokenAddress: string,
-    protocol: Protocol
-  ): Promise<bigint> {
-    try {
-      const result = await this.agent.invoke(`${protocol}_market_action`, {
-        action: "balance",
-        userId,
-        token: tokenAddress,
-      });
-
-      return BigInt(result || "0");
-    } catch {
-      return BigInt(0);
-    }
-  }
-
   private async analyzeAllMarkets(): Promise<MultiProtocolAnalysis[]> {
     const results: MultiProtocolAnalysis[] = [];
-
-    // Analyze Morpho markets
     try {
-      const morphoAnalysis = await this.agent.invoke("morpho_market_action", {
-        action: "analyze",
-      });
+      const morphoStream = await this.agent.stream(
+        {
+          messages: [
+            new SystemMessage("Analyze Morpho market conditions"),
+            new HumanMessage(JSON.stringify({ action: "analyze" })),
+          ],
+        },
+        this.agentConfig
+      );
+      const morphoAnalysisStr = await this.processAgentStream(morphoStream);
       results.push({
         timestamp: new Date().toISOString(),
         protocol: Protocol.MORPHO,
-        markets: JSON.parse(morphoAnalysis),
+        markets: JSON.parse(morphoAnalysisStr),
       });
     } catch (error) {
       console.error("Error analyzing Morpho markets:", error);
     }
-
-    // Analyze Aave markets
     try {
-      const aaveAnalysis = await this.agent.invoke("aave_market_action", {
-        action: "analyze",
-      });
+      const aaveStream = await this.agent.stream(
+        {
+          messages: [
+            new SystemMessage("Analyze Aave market conditions"),
+            new HumanMessage(JSON.stringify({ action: "analyze" })),
+          ],
+        },
+        this.agentConfig
+      );
+      const aaveAnalysisStr = await this.processAgentStream(aaveStream);
       results.push({
         timestamp: new Date().toISOString(),
         protocol: Protocol.AAVE,
-        markets: JSON.parse(aaveAnalysis),
+        markets: JSON.parse(aaveAnalysisStr),
       });
     } catch (error) {
       console.error("Error analyzing Aave markets:", error);
     }
-
     return results;
   }
 
@@ -403,31 +254,25 @@ export class AutonomousAgent extends EventEmitter {
     if (this.monitoringInterval) {
       clearInterval(this.monitoringInterval);
     }
-
     this.monitoringInterval = setInterval(async () => {
       try {
-        await this.monitorWallets();
+        await this.monitorWallet();
       } catch (error) {
         console.error("Error in monitoring cycle:", error);
       }
     }, 5 * 60 * 1000);
   }
 
-  private async monitorWallets() {
+  private async monitorWallet() {
     if (!this.isRunning) return;
-
     try {
-      const wallets = this.walletManager.getAllWallets();
-      for (const [userId, wallet] of wallets) {
-        const status = await this.checkWalletStatus(userId);
-        if (status.needsAttention) {
-          this.emit("alert", {
-            userId,
-            type: status.alertType,
-            message: status.message,
-            data: status.portfolio,
-          });
-        }
+      const status = await this.checkWalletStatus();
+      if (status.needsAttention) {
+        this.emit("alert", {
+          type: status.alertType,
+          message: status.message,
+          data: status.portfolio,
+        });
       }
     } catch (error) {
       console.error("Error in wallet monitoring:", error);
@@ -435,42 +280,38 @@ export class AutonomousAgent extends EventEmitter {
     }
   }
 
-  private async checkWalletStatus(userId: string): Promise<WalletStatus> {
-    if (!userId) {
-      return {
+  private async checkWalletStatus(): Promise<WalletStatus> {
+    try {
+      const walletProvider = await this.walletManager.getWallet();
+      if (!walletProvider) {
+        return {
           needsAttention: true,
           alertType: AlertType.ERROR,
-          message: "Please create a wallet first using 'create wallet' command",
-      };
-  }
-    try {
-      const walletProvider = await this.walletManager.getWallet(userId);
-        if (!walletProvider) {
-            return {
-                needsAttention: true,
-                alertType: AlertType.ERROR,
-                message: "Wallet not found. Please create a new wallet.",
-            };
-        }
-
-      // Check positions in all protocols
-      const [morphoPositions, aavePositions] = await Promise.all([
-        this.agent
-          .invoke("morpho_market_action", {
-            action: "check_position",
-            userId,
-          })
-          .then((res: any) => JSON.parse(res))
-          .catch(() => null),
-        this.agent
-          .invoke("aave_market_action", {
-            action: "check_position",
-            userId,
-          })
-          .then((res: any) => JSON.parse(res))
-          .catch(() => null),
-      ]);
-
+          message: "Wallet not found. Please create a wallet.",
+        };
+      }
+      const morphoStream = await this.agent.stream(
+        {
+          messages: [
+            new SystemMessage("Check Morpho positions"),
+            new HumanMessage(JSON.stringify({ action: "check_position" })),
+          ],
+        },
+        this.agentConfig
+      );
+      const aaveStream = await this.agent.stream(
+        {
+          messages: [
+            new SystemMessage("Check Aave positions"),
+            new HumanMessage(JSON.stringify({ action: "check_position" })),
+          ],
+        },
+        this.agentConfig
+      );
+      const morphoPositionsStr = await this.processAgentStream(morphoStream).catch(() => null);
+      const aavePositionsStr = await this.processAgentStream(aaveStream).catch(() => null);
+      const morphoPositions = morphoPositionsStr ? JSON.parse(morphoPositionsStr) : null;
+      const aavePositions = aavePositionsStr ? JSON.parse(aavePositionsStr) : null;
       if (!morphoPositions && !aavePositions) {
         return {
           needsAttention: false,
@@ -478,14 +319,7 @@ export class AutonomousAgent extends EventEmitter {
           message: "No active positions found",
         };
       }
-
-      // Calculate total portfolio metrics
-      const portfolio = this.calculatePortfolioMetrics(
-        morphoPositions,
-        aavePositions
-      );
-
-      // Check health factors
+      const portfolio = this.calculatePortfolioMetrics(morphoPositions, aavePositions);
       if (portfolio.healthFactor < 1.05) {
         return {
           needsAttention: true,
@@ -494,7 +328,6 @@ export class AutonomousAgent extends EventEmitter {
           portfolio,
         };
       }
-
       return {
         needsAttention: false,
         alertType: AlertType.INFO,
@@ -517,8 +350,6 @@ export class AutonomousAgent extends EventEmitter {
     let minHealthFactor = Infinity;
     let netAPY = 0;
     const positions: Position[] = [];
-
-    // Process Morpho positions
     if (morphoPositions?.positions) {
       morphoPositions.positions.forEach((pos: any) => {
         positions.push({
@@ -530,8 +361,6 @@ export class AutonomousAgent extends EventEmitter {
         totalSupplyUSD += Number(pos.supplyAmount);
       });
     }
-
-    // Process Aave positions
     if (aavePositions?.positions) {
       aavePositions.positions.forEach((pos: any) => {
         positions.push({
@@ -543,7 +372,6 @@ export class AutonomousAgent extends EventEmitter {
         totalSupplyUSD += Number(pos.supplyAmount);
       });
     }
-
     return {
       totalSupplyUSD: totalSupplyUSD.toString(),
       totalBorrowUSD: totalBorrowUSD.toString(),
@@ -557,7 +385,6 @@ export class AutonomousAgent extends EventEmitter {
     if (this.optimizationInterval) {
       clearInterval(this.optimizationInterval);
     }
-
     this.optimizationInterval = setInterval(async () => {
       try {
         await this.optimizePositions();
@@ -567,31 +394,18 @@ export class AutonomousAgent extends EventEmitter {
     }, 10 * 60 * 1000);
   }
 
-  private async optimizePositions(specificUsers?: string[]) {
+  private async optimizePositions() {
     try {
-      const wallets = this.walletManager.getAllWallets();
-      const usersToCheck = specificUsers || Array.from(wallets.keys());
       const marketAnalysis = await this.analyzeAllMarkets();
-
-      for (const userId of usersToCheck) {
-        const status = await this.checkWalletStatus(userId.toString());
-        if (!status.portfolio) continue;
-
-        for (const position of status.portfolio.positions) {
-          const opportunity = await this.findBestOpportunity(
-            position,
-            marketAnalysis
-          );
-
-          if (opportunity && opportunity.isProfit) {
-            this.emit("optimizationFound", opportunity);
-            const success = await this.executeRebalancing(
-              userId.toString(),
-              opportunity
-            );
-            if (success) {
-              this.emit("optimizationExecuted", opportunity);
-            }
+      const status = await this.checkWalletStatus();
+      if (!status.portfolio) return;
+      for (const position of status.portfolio.positions) {
+        const opportunity = await this.findBestOpportunity(position, marketAnalysis);
+        if (opportunity && opportunity.isProfit) {
+          this.emit("optimizationFound", opportunity);
+          const success = await this.executeRebalancing(opportunity);
+          if (success) {
+            this.emit("optimizationExecuted", opportunity);
           }
         }
       }
@@ -607,17 +421,11 @@ export class AutonomousAgent extends EventEmitter {
     try {
       let bestOpportunity: MarketData | null = null;
       let highestAPY = currentPosition.metrics.supplyAPY;
-
-      // Check all protocols for better opportunities
       for (const analysis of marketAnalysis) {
         for (const market of analysis.markets) {
-          if (
-            !market.risk.isHealthy ||
-            market.risk.utilizationRisk === "HIGH"
-          ) {
+          if (!market.risk.isHealthy || market.risk.utilizationRisk === "HIGH") {
             continue;
           }
-
           const totalAPY = market.apy.supply + (market.apy.rewards || 0);
           if (totalAPY > highestAPY) {
             bestOpportunity = market;
@@ -625,25 +433,16 @@ export class AutonomousAgent extends EventEmitter {
           }
         }
       }
-
       if (!bestOpportunity) return null;
-
-      // Calculate gas costs and profitability
-      const gasEstimate = await this.estimateRebalancingGas(
-        currentPosition,
-        bestOpportunity
-      );
-
+      const gasEstimate = await this.estimateRebalancingGas(currentPosition, bestOpportunity);
       const monthlyProfit = this.calculateMonthlyProfit(
         currentPosition.supplyAmount,
         currentPosition.metrics.supplyAPY,
         highestAPY
       );
-
-      const isProfitable = monthlyProfit > Number(gasEstimate) * 3; // 3-month payback period
-
+      const isProfitable = monthlyProfit > Number(gasEstimate) * 3;
       return {
-        userId: currentPosition.marketId, // Using marketId as userId here
+        userId: currentPosition.marketId,
         currentPosition: {
           protocol: currentPosition.protocol,
           marketId: currentPosition.marketId,
@@ -666,26 +465,39 @@ export class AutonomousAgent extends EventEmitter {
     targetMarket: MarketData
   ): Promise<bigint> {
     try {
-      // Estimate withdraw gas
-      const withdrawGas = await this.agent
-        .invoke(`${currentPosition.protocol}_market_action`, {
-          action: "withdraw",
-          marketId: currentPosition.marketId,
-          amount: currentPosition.supplyAmount,
-          simulate: true,
-        })
-        .then((res: any) => BigInt(JSON.parse(res).gasEstimate || 0));
-
-      // Estimate supply gas
-      const supplyGas = await this.agent
-        .invoke(`${targetMarket.protocol}_market_action`, {
-          action: "supply",
-          marketId: targetMarket.marketId,
-          amount: currentPosition.supplyAmount,
-          simulate: true,
-        })
-        .then((res: any) => BigInt(JSON.parse(res).gasEstimate || 0));
-
+      const config = this.agentConfig;
+      const withdrawStream = await this.agent.stream(
+        {
+          messages: [
+            new SystemMessage(`Call ${currentPosition.protocol}_market_action for withdraw simulation`),
+            new HumanMessage(JSON.stringify({
+              action: "withdraw",
+              marketId: currentPosition.marketId,
+              amount: currentPosition.supplyAmount,
+              simulate: true,
+            })),
+          ],
+        },
+        config
+      );
+      const withdrawResStr = await this.processAgentStream(withdrawStream);
+      const withdrawGas = BigInt(JSON.parse(withdrawResStr).gasEstimate || 0);
+      const supplyStream = await this.agent.stream(
+        {
+          messages: [
+            new SystemMessage(`Call ${targetMarket.protocol}_market_action for supply simulation`),
+            new HumanMessage(JSON.stringify({
+              action: "supply",
+              marketId: targetMarket.marketId,
+              amount: currentPosition.supplyAmount,
+              simulate: true,
+            })),
+          ],
+        },
+        config
+      );
+      const supplyResStr = await this.processAgentStream(supplyStream);
+      const supplyGas = BigInt(JSON.parse(supplyResStr).gasEstimate || 0);
       return withdrawGas + supplyGas;
     } catch (error) {
       console.error("Error estimating gas:", error);
@@ -703,7 +515,6 @@ export class AutonomousAgent extends EventEmitter {
   }
 
   private async executeRebalancing(
-    userId: string,
     optimization: OptimizationResult
   ): Promise<boolean> {
     if (
@@ -713,49 +524,48 @@ export class AutonomousAgent extends EventEmitter {
     ) {
       return false;
     }
-
     try {
+      const config = this.agentConfig;
       const currentPos = optimization.currentPosition;
       const targetMarket = optimization.suggestedMarket;
-
-      // Execute withdrawal
-      const withdrawResult = await this.agent.invoke(
-        `${currentPos.protocol}_market_action`,
+      const withdrawStream = await this.agent.stream(
         {
-          action: "withdraw",
-          userId,
-          marketId: currentPos.marketId,
-          amount: currentPos.position.supplyAmount,
-        }
+          messages: [
+            new SystemMessage(`Call ${currentPos.protocol}_market_action for withdraw execution`),
+            new HumanMessage(JSON.stringify({
+              action: "withdraw",
+              marketId: currentPos.marketId,
+              amount: currentPos.position.supplyAmount,
+            })),
+          ],
+        },
+        config
       );
-
-      if (!JSON.parse(withdrawResult).success) {
+      const withdrawResultStr = await this.processAgentStream(withdrawStream);
+      if (!JSON.parse(withdrawResultStr).success) {
         throw new Error("Withdrawal failed");
       }
-
-      // Execute supply
-      const supplyResult = await this.agent.invoke(
-        `${targetMarket.protocol}_market_action`,
+      const supplyStream = await this.agent.stream(
         {
-          action: "supply",
-          userId,
-          marketId: targetMarket.marketId,
-          amount: currentPos.position.supplyAmount,
-        }
+          messages: [
+            new SystemMessage(`Call ${targetMarket.protocol}_market_action for supply execution`),
+            new HumanMessage(JSON.stringify({
+              action: "supply",
+              marketId: targetMarket.marketId,
+              amount: currentPos.position.supplyAmount,
+            })),
+          ],
+        },
+        config
       );
-
-      if (!JSON.parse(supplyResult).success) {
+      const supplyResultStr = await this.processAgentStream(supplyStream);
+      if (!JSON.parse(supplyResultStr).success) {
         throw new Error("Supply failed");
       }
-
       return true;
     } catch (error) {
       console.error("Error executing rebalancing:", error);
-      this.emit("error", {
-        type: "rebalancing",
-        userId,
-        error,
-      });
+      this.emit("error", { type: "rebalancing", error });
       return false;
     }
   }
@@ -766,7 +576,6 @@ export class AutonomousAgent extends EventEmitter {
       if (!initialized) {
         throw new Error("Failed to initialize agent");
       }
-
       this.emit("started");
       return true;
     } catch (error) {
@@ -779,23 +588,14 @@ export class AutonomousAgent extends EventEmitter {
   async stop() {
     try {
       this.isRunning = false;
-
       if (this.monitoringInterval) {
         clearInterval(this.monitoringInterval);
       }
       if (this.optimizationInterval) {
         clearInterval(this.optimizationInterval);
       }
-      for (const interval of this.depositMonitoringIntervals.values()) {
-        clearInterval(interval);
-      }
-      this.depositMonitoringIntervals.clear();
-
       this.marketCache.clear();
-      this.lastKnownBalances.clear();
-
       await this.walletManager.stop();
-
       this.emit("stopped");
       return true;
     } catch (error) {

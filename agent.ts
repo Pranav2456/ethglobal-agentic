@@ -31,7 +31,7 @@ async function setupAgent() {
 
         // Create agent and interface
         const agent = new AutonomousAgent();
-        const agentInterface = new AgentInterface(agent, false);
+        const agentInterface = new AgentInterface(agent, true);
 
         return agentInterface;
     } catch (error: any) {

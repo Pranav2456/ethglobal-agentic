@@ -16,9 +16,12 @@ export enum AlertType {
 export interface StoredWalletData {
     userId: string;
     address: string;
-    data: WalletData;
+    data: {
+        walletId: string;
+        networkId: string;
+        exportedData: any;  // This will store the CDP wallet export data
+    };
 }
-
 export interface MarketData {
     protocol: Protocol;
     name: string;

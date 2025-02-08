@@ -17,13 +17,11 @@ export class WalletManager extends EventEmitter {
     private wallets: Map<string, StoredWalletData> = new Map();
     private readonly WALLET_DIR = "data";
     private readonly WALLET_FILE = "wallets.json";
-    private backupInterval?: NodeJS.Timeout;
 
     constructor() {
         super();
         this.initializeStorage();
         this.loadWallets();
-        this.startBackups();
     }
 
     private initializeStorage() {
@@ -50,7 +48,6 @@ export class WalletManager extends EventEmitter {
             }
         } catch (error) {
             console.error('Error loading wallets:', error);
-            // Create backup of corrupted file
             if (fs.existsSync(this.walletPath)) {
                 const backup = `${this.walletPath}.backup.${Date.now()}`;
                 fs.copyFileSync(this.walletPath, backup);
@@ -59,15 +56,12 @@ export class WalletManager extends EventEmitter {
         }
     }
 
-    private saveWallets() {
+    private async saveWallets() {
         try {
             const tempFile = `${this.walletPath}.temp`;
             const data = Object.fromEntries(this.wallets);
             
-            // Write to temporary file first
             fs.writeFileSync(tempFile, JSON.stringify(data, null, 2));
-            
-            // Rename temp file to actual file (atomic operation)
             fs.renameSync(tempFile, this.walletPath);
             
             this.emit('walletsSaved', this.wallets.size);
@@ -78,36 +72,20 @@ export class WalletManager extends EventEmitter {
         }
     }
 
-    private startBackups() {
-        // Create periodic backups
-        this.backupInterval = setInterval(() => {
-            const backup = `${this.walletPath}.backup.${Date.now()}`;
-            try {
-                if (fs.existsSync(this.walletPath)) {
-                    fs.copyFileSync(this.walletPath, backup);
-                    this.emit('backupCreated', backup);
-                }
-            } catch (error) {
-                console.error('Backup creation failed:', error);
-                this.emit('error', { type: 'backupFailed', error });
-            }
-        }, 24 * 60 * 60 * 1000); // Daily backups
-    }
-
     async createWallet(): Promise<{ userId: string; address: string }> {
         try {
-            // Create a unique user ID
             const userId = `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-            // Create CDP wallet
+            // Create CDP wallet provider for initial setup
             const provider = await CdpWalletProvider.configureWithWallet({
                 apiKeyName: process.env.CDP_API_KEY_NAME!,
                 apiKeyPrivateKey: process.env.CDP_API_KEY_PRIVATE_KEY!.replace(/\\n/g, "\n"),
                 networkId: CONFIG.NETWORK.id,
             });
 
-            // Get wallet address
+            // Get wallet address and export data
             const address = await provider.getAddress();
+            const exportedData = await provider.exportWallet();
 
             // Store wallet data
             const walletData: StoredWalletData = {
@@ -116,7 +94,7 @@ export class WalletManager extends EventEmitter {
                 data: {
                     walletId: userId,
                     networkId: CONFIG.NETWORK.id,
-                    seed: await this.generateSecureSeed()
+                    exportedData
                 }
             };
 
@@ -126,36 +104,28 @@ export class WalletManager extends EventEmitter {
             this.emit('walletCreated', { userId, address });
             return { userId, address };
         } catch (error) {
-            if (error instanceof TimeoutError) {
-                this.emit('error', { type: 'timeout', error });
-                throw new Error('Wallet creation timed out. Please try again.');
-            }
-            // Generic error handling
+            console.error('Error creating wallet:', error);
             this.emit('error', { type: 'creation', error });
             throw error;
         }
     }
 
-    private async generateSecureSeed(): Promise<string> {
-        // Generate secure random bytes for wallet seed
-        const crypto = await import('crypto');
-        return crypto.randomBytes(32).toString('hex');
-    }
-
     async getWallet(userId: string): Promise<CdpWalletProvider | null> {
-        const storedData = this.wallets.get(userId);
-        if (!storedData) return null;
-
         try {
+            const storedData = this.wallets.get(userId);
+            if (!storedData) {
+                throw new Error('Wallet not found');
+            }
+
             // Create provider with stored data
             const provider = await CdpWalletProvider.configureWithWallet({
                 apiKeyName: process.env.CDP_API_KEY_NAME!,
                 apiKeyPrivateKey: process.env.CDP_API_KEY_PRIVATE_KEY!.replace(/\\n/g, "\n"),
                 networkId: storedData.data.networkId,
-                cdpWalletData: JSON.stringify(storedData.data)
+                cdpWalletData: JSON.stringify(storedData.data.exportedData)
             });
 
-            // Verify provider is working
+            // Verify provider
             const address = await provider.getAddress();
             if (address.toLowerCase() !== storedData.address.toLowerCase()) {
                 throw new Error('Wallet address mismatch');
@@ -169,49 +139,11 @@ export class WalletManager extends EventEmitter {
         }
     }
 
-    async getWalletByAddress(address: string): Promise<{ userId: string; provider: CdpWalletProvider } | null> {
-        for (const [userId, walletData] of this.wallets.entries()) {
-            if (walletData.address.toLowerCase() === address.toLowerCase()) {
-                const provider = await this.getWallet(userId);
-                if (provider) {
-                    return { userId, provider };
-                }
-            }
-        }
-        return null;
+    getAllWallets(): Map<string, StoredWalletData> {
+        return new Map(this.wallets);
     }
 
-    async validateWallet(userId: string): Promise<boolean> {
-        try {
-            const provider = await this.getWallet(userId);
-            if (!provider) return false;
-
-            // Check provider functionality
-            const address = await provider.getAddress();
-
-            return !!address;
-        } catch {
-            return false;
-        }
-    }
-
-    getAllWallets(): [string, StoredWalletData][] {
-        return Array.from(this.wallets.entries());
-    }
-
-    async deleteWallet(userId: string): Promise<boolean> {
-        const wallet = this.wallets.get(userId);
-        if (!wallet) return false;
-
-        this.wallets.delete(userId);
-        await this.saveWallets();
-        this.emit('walletDeleted', userId);
-        return true;
-    }
-
-    stop() {
-        if (this.backupInterval) {
-            clearInterval(this.backupInterval);
-        }
+    async stop() {
+        // Cleanup if needed
     }
 }

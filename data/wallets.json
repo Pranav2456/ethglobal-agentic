@@ -1,0 +1,37 @@
+{
+  "user_1739001531707_24iudc5sm": {
+    "userId": "user_1739001531707_24iudc5sm",
+    "address": "0x403fE6FF4fA8aE59b88fD2b7f8F35199aD2Eed6f",
+    "data": {
+      "walletId": "user_1739001531707_24iudc5sm",
+      "networkId": "base-mainnet",
+      "seed": "74feb2b4a9f45bc39b49f940c4dee000a6119c474cc8ad3a591466d09c547f35"
+    }
+  },
+  "user_1739002301481_7dipudhxk": {
+    "userId": "user_1739002301481_7dipudhxk",
+    "address": "0xBD1CF8500c2b0EBC599009415d6fFc88e6796FeD",
+    "data": {
+      "walletId": "user_1739002301481_7dipudhxk",
+      "networkId": "base-mainnet",
+      "exportedData": {
+        "walletId": "ba943cca-4110-4342-a62d-256549feb284",
+        "seed": "346cc7130db3e3089bf69bbdbf4225d5ed85e4cc953a65b7565ecad172b93044",
+        "networkId": "base-mainnet"
+      }
+    }
+  },
+  "user_1739002470376_dhtmbnp9q": {
+    "userId": "user_1739002470376_dhtmbnp9q",
+    "address": "0xe7355A8c72Ec5fA7951B1073E4eE50Ca0a47faD7",
+    "data": {
+      "walletId": "user_1739002470376_dhtmbnp9q",
+      "networkId": "base-mainnet",
+      "exportedData": {
+        "walletId": "d9e2314b-d9ff-4370-a33d-632fd89890e2",
+        "seed": "9cd893b434110fc221a3a0c65bbeffccf7a0dfe2337669f87a28174b6a694795",
+        "networkId": "base-mainnet"
+      }
+    }
+  }
+}

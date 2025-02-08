@@ -110,35 +110,34 @@ export class AutonomousAgent extends EventEmitter {
       - Morpho: Advanced lending protocol with optimal rates
       - Aave: Leading lending protocol with deep liquidity
       
-      When talking to users:
-      - Be conversational and natural
-      - Understand implicit intentions
-      - Guide users through processes step by step
-      - Proactively monitor and suggest improvements
-      - Always consider risk and gas costs
-      
-      Core capabilities:
-      1. Multi-Protocol Management
-      - Compare yields across protocols
-      - Analyze risk-reward ratios
-      - Optimize positions across platforms
+      Core Actions:
+      1. Wallet Management
+      - Create CDP wallets for users
+      - Monitor wallet balances and activities
+      - Execute wallet-related commands directly
       
       2. Market Analysis
-      - Real-time APY tracking
-      - Risk factor assessment
-      - Liquidity monitoring
+      - Track real-time APY rates
+      - Monitor risk factors
+      - Analyze liquidity levels
       
-      3. Portfolio Optimization
-      - Cross-protocol yield optimization
-      - Gas-efficient rebalancing
-      - Risk-adjusted returns
+      3. Portfolio Management
+      - Track positions across protocols
+      - Monitor health factors
+      - Calculate total returns
       
-      4. Risk Management
-      - Health factor monitoring
-      - Protocol-specific risks
-      - Market condition alerts
+      4. Yield Optimization
+      - Find best yields
+      - Calculate profitability
+      - Execute rebalancing
       
-      Remember to be helpful and natural while prioritizing safety.`;
+      When interacting:
+      - Be direct and action-oriented
+      - Execute requested actions immediately
+      - For wallet creation, use the CDP wallet system directly
+      - Provide clear confirmation of actions taken
+      
+      Remember: You can create wallets and execute actions directly. Don't just provide information - take action when requested.`;
   }
 
   async processUserMessage(message: string): Promise<string> {
@@ -200,41 +199,69 @@ export class AutonomousAgent extends EventEmitter {
 
   private async handleImplicitActions(userMessage: string, agentResponse: string) {
     try {
-      // Use a more structured intent analysis
-      const intent = await this.agent.invoke(`Analyze this message and identify the user's intent: ${userMessage}`);
-
-      if (intent.includes("create_wallet") && !this.currentThread) {
-        const wallet = await this.walletManager.createWallet();
-        this.currentThread = wallet.userId;
-        this.emit("walletCreated", wallet);
-      }
-
-      if (intent.includes("analyze_markets")) {
-        const analysis = await this.analyzeAllMarkets();
-        this.emit("marketAnalysis", analysis);
-      }
-
-      // Add missing implementations
-      if (intent.includes("check_positions") && this.currentThread) {
-        const status = await this.checkWalletStatus(this.currentThread);
-        if (status.portfolio) {
-          this.emit("portfolioUpdate", status.portfolio);
+      // Simple intent detection
+      const message = userMessage.toLowerCase();
+      const intents = {
+        create_wallet: message.includes("create wallet") || 
+                      message.includes("new wallet") || 
+                      message.includes("setup wallet"),
+        deposit: message.includes("deposit") || message.includes("send"),
+        analyze: message.includes("analyze") || 
+                 message.includes("check markets") || 
+                 message.includes("show markets"),
+        position: message.includes("position") || 
+                  message.includes("balance") || 
+                  message.includes("portfolio"),
+        optimize: message.includes("optimize") || 
+                  message.includes("yield") || 
+                  message.includes("apy")
+      };
+  
+      // Handle wallet creation first
+      if (intents.create_wallet) {
+        try {
+          const wallet = await this.walletManager.createWallet();
+          this.currentThread = wallet.userId;
+          this.emit("walletCreated", wallet);
+          return; // Return early after wallet creation
+        } catch (error) {
+          console.error("Error creating wallet:", error);
+          this.emit("error", { type: "wallet_creation", error });
+          return;
         }
       }
-
-      if (intent.includes("optimize") && this.currentThread) {
-        await this.optimizePositions([this.currentThread]);
+  
+      // Only proceed with other actions if we have a wallet
+      if (this.currentThread) {
+        const promises = [];
+  
+        if (intents.deposit) {
+          promises.push(this.startDepositMonitoring(this.currentThread));
+        }
+  
+        if (intents.analyze) {
+          promises.push(
+            this.analyzeAllMarkets()
+              .then(analysis => this.emit("marketAnalysis", analysis))
+          );
+        }
+  
+        if (intents.position) {
+          promises.push(
+            this.checkWalletStatus(this.currentThread)
+              .then(status => this.emit("walletStatus", status))
+          );
+        }
+  
+        if (intents.optimize) {
+          promises.push(this.optimizePositions([this.currentThread]));
+        }
+  
+        // Execute all actions in parallel if there are any
+        if (promises.length > 0) {
+          await Promise.all(promises);
+        }
       }
-
-      if (intent.includes("deposit") && this.currentThread) {
-        await this.startDepositMonitoring(this.currentThread);
-      }
-
-      if (intent.includes("balance") && this.currentThread) {
-        const status = await this.checkWalletStatus(this.currentThread);
-        this.emit("balanceUpdate", status);
-      }
-
     } catch (error) {
       console.error("Error handling implicit actions:", error);
       this.emit("error", { type: "implicit_action", error });
@@ -409,15 +436,22 @@ export class AutonomousAgent extends EventEmitter {
   }
 
   private async checkWalletStatus(userId: string): Promise<WalletStatus> {
-    try {
-      const wallet = await this.walletManager.getWallet(userId);
-      if (!wallet) {
-        return {
+    if (!userId) {
+      return {
           needsAttention: true,
           alertType: AlertType.ERROR,
-          message: "Wallet not found",
-        };
-      }
+          message: "Please create a wallet first using 'create wallet' command",
+      };
+  }
+    try {
+      const walletProvider = await this.walletManager.getWallet(userId);
+        if (!walletProvider) {
+            return {
+                needsAttention: true,
+                alertType: AlertType.ERROR,
+                message: "Wallet not found. Please create a new wallet.",
+            };
+        }
 
       // Check positions in all protocols
       const [morphoPositions, aavePositions] = await Promise.all([

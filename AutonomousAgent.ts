@@ -160,20 +160,43 @@ Remember: You can execute actions directly. Don't just provide information - tak
 
   private async processAgentStream(stream: AsyncIterable<any>): Promise<string> {
     let response = "";
+    let pendingToolCalls = new Map<string, boolean>();
+    
     try {
-      for await (const chunk of stream) {
-        if ("agent" in chunk) {
-          response += chunk.agent.messages[0].content + "\n";
-        } else if ("tools" in chunk) {
-          response += chunk.tools.messages[0].content + "\n";
+        for await (const chunk of stream) {
+            // Handle agent messages with tool calls
+            if ("agent" in chunk && chunk.agent.messages?.[0]) {
+                const message = chunk.agent.messages[0];
+                if (message.tool_calls) {
+                    // Track each tool call ID
+                    message.tool_calls.forEach((call: any) => {
+                        pendingToolCalls.set(call.id, true);
+                    });
+                }
+                response += (message.content || "") + "\n";
+            }
+            // Handle tool responses
+            else if ("tools" in chunk && chunk.tools.messages?.[0]) {
+                const toolMessage = chunk.tools.messages[0];
+                if (toolMessage.tool_call_id) {
+                    // Mark tool call as responded
+                    pendingToolCalls.delete(toolMessage.tool_call_id);
+                    response += (toolMessage.content || "") + "\n";
+                }
+            }
+
+            // Wait for all tool calls to be responded to
+            if (pendingToolCalls.size === 0) {
+                await new Promise(resolve => setTimeout(resolve, 100)); // Small delay to ensure all messages are processed
+            }
         }
-      }
-      return response.trim();
+
+        return response.trim();
     } catch (error) {
-      console.error("Error processing stream:", error);
-      throw error;
+        console.error("Error processing stream:", error);
+        throw error;
     }
-  }
+}
 
   private async handleImplicitActions(userMessage: string, agentResponse: string) {
     try {

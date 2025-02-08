@@ -15,13 +15,14 @@ import {
     SimulationResult,
     TransactionRequest
 } from "../types";
+import { Wallet, readContract } from "@coinbase/coinbase-sdk";
 import { 
     publicClient, 
     simulateApproval, 
     simulateStrategy, 
     estimateGasCosts 
 } from "../utils/viem";
-import { formatUnits, parseUnits } from "viem";
+import { formatUnits, parseUnits, encodeAbiParameters } from "viem";
 import EventEmitter from "events";
 import { PublicClient } from "viem";
 import { ERC20_ABI, YIELD_MANAGER_ABI } from "../contracts/abis";
@@ -30,6 +31,9 @@ import { ethers } from "ethers";
 
 // Add type guard for token names
 type TokenName = keyof typeof CONFIG.TOKENS;
+
+// Add at the top with other types
+type TokenSymbol = keyof typeof CONFIG.TOKENS;
 
 class MorphoProvider extends EventEmitter {
     private marketCache: Map<string, { data: MarketData; timestamp: number }> = new Map();
@@ -100,7 +104,7 @@ class MorphoProvider extends EventEmitter {
             name: "morpho_market_action",
             description: "Manages Morpho market interactions for yield optimization",
             schema: z.object({
-                action: z.enum(['analyze', 'supply', 'withdraw', 'balance', 'check_position']),
+                action: z.enum(['analyze', 'supply', 'withdraw', 'balance', 'check_position', 'check_token_balances']),
                 marketId: z.string().optional(),
                 amount: z.string().optional(),
                 shares: z.string().optional()
@@ -118,6 +122,10 @@ class MorphoProvider extends EventEmitter {
                             return await this.handleWithdraw(userAddress, args);
                         case 'check_position':
                             return await this.checkPosition(userAddress, args.marketId);
+                        case 'balance':
+                            return await this.checkBalance(userAddress);
+                        case 'check_token_balances':
+                            return await this.checkAllTokenBalances(userAddress);
                         default:
                             throw new Error('Invalid action');
                     }
@@ -153,25 +161,36 @@ class MorphoProvider extends EventEmitter {
     ): Promise<string> {
         try {
             const positions: Position[] = [];
-
-            const marketsToCheck = marketId 
-                ? [{ id: marketId }]
-                : Object.values(CONFIG.MORPHO.markets);
-
+    
+            // Fix: Use proper market IDs from config
+            let marketsToCheck;
+            if (marketId) {
+                // If specific market requested, find it in config
+                const marketConfig = Object.values(CONFIG.MORPHO.markets).find(
+                    market => market.id.toLowerCase() === marketId.toLowerCase()
+                );
+                marketsToCheck = marketConfig ? [marketConfig] : [];
+            } else {
+                // Otherwise check all markets
+                marketsToCheck = Object.values(CONFIG.MORPHO.markets);
+            }
+    
             for (const market of marketsToCheck) {
                 try {
                     if (!market.id || typeof market.id !== 'string') {
-                        throw new Error('Invalid market ID');
+                        console.warn('Invalid market configuration');
+                        continue;
                     }
+    
                     const position = await AccrualPosition.fetch(
                         userAddress,
-                        market.id as `0x${string}` as MarketId,  // Correctly type the market ID
+                        market.id as `0x${string}` as MarketId,
                         publicClient
                     );
-
+    
                     const accruedPosition = position.accrueInterest(Time.timestamp());
                     const marketData = await this.getMarketData(market.id);
-
+    
                     if (accruedPosition.supplyAssets > BigInt(0) || accruedPosition.borrowAssets > BigInt(0)) {
                         positions.push({
                             protocol: Protocol.MORPHO,
@@ -191,7 +210,7 @@ class MorphoProvider extends EventEmitter {
                     console.warn(`Error fetching position for market ${market.id}:`, error);
                 }
             }
-
+    
             return JSON.stringify(positions);
         } catch (error) {
             console.error('Error checking positions:', error);
@@ -201,57 +220,101 @@ class MorphoProvider extends EventEmitter {
 
     private async handleSupply(
         userAddress: `0x${string}`,
-        args: { marketId?: string; amount?: string; token?: string },
+        args: { marketId: string; amount: string; token: string },
         walletProvider: CdpWalletProvider
-    ): Promise<string> {
+      ): Promise<string> {
         if (!args.amount || !args.token || !args.marketId) {
-            throw new Error("Amount, token, and marketId required");
+          throw new Error("Amount, token, and marketId required");
         }
-    
+      
         try {
-            const tokens = [args.token as `0x${string}`];
-            const amount = parseUnits(args.amount, 18);
-            const amounts = [amount];
-            const additionalData = ethers.utils.defaultAbiCoder.encode(['bytes32'], [args.marketId]);
-    
-            // First approve token spend
-            const approveTx = await walletProvider.sendTransaction({
-                to: args.token as `0x${string}`,
-                data: encodeFunctionData({
-                    abi: ERC20_ABI,
-                    functionName: 'approve',
-                    args: [CONFIG.YIELD_MANAGER.address as `0x${string}`, amount]
-                })
+          // --- Step 1: Export wallet data from your wallet provider ---
+          const walletData = await walletProvider.exportWallet();
+          console.log("Exported wallet data:", walletData);
+          
+          // --- Step 2: Import the wallet data into a Coinbase SDK Wallet instance ---
+          const sdkWallet = await Wallet.import(walletData);
+          
+          // Verify that the imported wallet's default address is valid.
+          const sdkAddress = await sdkWallet.getDefaultAddress();
+          console.log("Imported SDK Wallet Address:", sdkAddress.toString());
+          if (sdkAddress.toString() === "0x0000000000000000000000000000000000000000") {
+            throw new Error("Imported wallet address is zero—check your wallet data.");
+          }
+          
+          // --- Step 3: Prepare token parameters ---
+          const tokenSymbol = args.token.toUpperCase();
+          const tokenConfig = CONFIG.TOKENS[tokenSymbol as keyof typeof CONFIG.TOKENS];
+          if (!tokenConfig) {
+            throw new Error(`Token ${tokenSymbol} not found in config`);
+          }
+          const tokenAddress = tokenConfig.address as `0x${string}`;
+          const amountBigInt = parseUnits(args.amount, tokenConfig.decimals);
+          
+          // --- Step 4: Check current allowance ---
+          const currentAllowance: bigint = await readContract({
+            networkId: CONFIG.NETWORK.id, // e.g., "base-mainnet"
+            abi: ERC20_ABI,
+            contractAddress: tokenAddress,
+            method: "allowance",
+            // Pass args as an object if supported; adjust as needed.
+            args: { owner: sdkAddress.toString(), spender: CONFIG.YIELD_MANAGER.address as `0x${string}` },
+          });
+          console.log("Current allowance:", currentAllowance.toString());
+          
+          // If current allowance is insufficient, perform the approval transaction.
+          if (currentAllowance < amountBigInt) {
+            console.log("Allowance insufficient. Sending approval transaction.");
+            const approveArgs = {
+              spender: CONFIG.YIELD_MANAGER.address as `0x${string}`,
+              value: amountBigInt.toString(),
+            };
+            const approveInvocation = await sdkWallet.invokeContract({
+              contractAddress: tokenAddress,
+              method: "approve",
+              args: approveArgs,
+              abi: ERC20_ABI,
             });
-            await walletProvider.waitForTransactionReceipt(approveTx);
-    
-            // Execute deposit
-            const depositTx = await walletProvider.sendTransaction({
-                to: CONFIG.YIELD_MANAGER.address as `0x${string}`,
-                data: encodeFunctionData({
-                    abi: YIELD_MANAGER_ABI,
-                    functionName: 'deposit',
-                    args: [
-                        CONFIG.STRATEGIES.MORPHO.address as `0x${string}`,
-                        tokens,
-                        amounts,
-                        // @ts-ignore
-                        additionalData,
-                        userAddress
-                    ]
-                })
-            });
-            await walletProvider.waitForTransactionReceipt(depositTx);
-    
-            return JSON.stringify({
-                success: true,
-                approveTxHash: approveTx,
-                depositTxHash: depositTx
-            });
+            await approveInvocation.wait();
+            console.log("Approval confirmed.");
+          } else {
+            console.log("Sufficient allowance available. Skipping approval.");
+          }
+          
+          // --- Step 5: Execute the deposit ---
+          // For MORPHO deposits, the tests require _additionalData = abi.encode(marketId).
+          // Ensure args.marketId is a properly formatted bytes32 string.
+          const depositAdditionalData = encodeAbiParameters(
+            [{ type: "bytes32" }],
+            [args.marketId as `0x${string}`]
+          );
+          
+          const depositArgs = {
+            _strategy: CONFIG.STRATEGIES.MORPHO.address as `0x${string}`,
+            _tokens: [tokenAddress],
+            _amounts: [amountBigInt.toString()], // Convert to string for serialization
+            _additionalData: depositAdditionalData,
+            _for: userAddress,
+          };
+          
+          const depositInvocation = await sdkWallet.invokeContract({
+            contractAddress: CONFIG.YIELD_MANAGER.address as `0x${string}`,
+            method: "deposit",
+            args: depositArgs,
+            abi: YIELD_MANAGER_ABI,
+          });
+          await depositInvocation.wait();
+          console.log("Deposit confirmed.");
+          
+          return JSON.stringify({
+            success: true,
+            message: "Supply (approval and deposit) successful",
+          });
         } catch (error: any) {
-            throw error;
+          console.error("Supply failed:", error);
+          throw error;
         }
-    }
+      }
 
     private async handleWithdraw(
         userAddress: `0x${string}`,
@@ -263,7 +326,68 @@ class MorphoProvider extends EventEmitter {
         message: 'Withdrawal not implemented'
        });
     }
+
+    private async checkBalance(userAddress: `0x${string}`): Promise<string> {
+        try {
+            // Get ETH balance
+            const ethBalance = await publicClient.getBalance({ address: userAddress });
+            
+            // Get token balances
+            const tokenBalances = await Promise.all(
+                Object.entries(CONFIG.TOKENS).map(async ([symbol, token]) => ({
+                    symbol,
+                    balance: await publicClient.readContract({
+                        address: token.address as `0x${string}`,
+                        abi: ERC20_ABI,
+                        functionName: 'balanceOf',
+                        args: [userAddress]
+                    })
+                }))
+            );
+
+            return JSON.stringify({
+                eth: ethBalance.toString(),
+                tokens: Object.fromEntries(
+                    tokenBalances.map(({ symbol, balance }) => [symbol, balance.toString()])
+                )
+            });
+        } catch (error) {
+            console.error('Error checking balances:', error);
+            throw error;
+        }
+    }
+
+    private async checkAllTokenBalances(userAddress: `0x${string}`): Promise<string> {
+        try {
+            const balances = await Promise.all(
+                Object.entries(CONFIG.TOKENS).map(async ([symbol, token]) => ({
+                    symbol: symbol as TokenSymbol,
+                    address: token.address,
+                    balance: formatUnits(
+                        await publicClient.readContract({
+                            address: token.address as `0x${string}`,
+                            abi: ERC20_ABI,
+                            functionName: 'balanceOf',
+                            args: [userAddress]
+                        }),
+                        token.decimals || 18
+                    )
+                }))
+            );
+
+            return JSON.stringify({
+                tokens: Object.fromEntries(
+                    balances.map(({ symbol, balance }) => [symbol, balance])
+                )
+            });
+        } catch (error) {
+            console.error('Error checking token balances:', error);
+            throw error;
+        }
+    }
 }
+
+
 
 // Export singleton instance
 export const morphoProvider = new MorphoProvider().createProvider();

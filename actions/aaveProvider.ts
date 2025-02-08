@@ -3,8 +3,9 @@ import {
     customActionProvider, 
     CdpWalletProvider 
 } from "@coinbase/agentkit";
+import { Wallet, readContract } from "@coinbase/coinbase-sdk";
 import { z } from "zod";
-import { ethers } from 'ethers';
+import { ethers, Transaction } from 'ethers';
 import {
     UiPoolDataProvider,
     UiIncentiveDataProvider,
@@ -13,7 +14,7 @@ import {
 import * as markets from '@bgd-labs/aave-address-book';
 import { formatReservesAndIncentives, formatUserSummaryAndIncentives } from '@aave/math-utils';
 import dayjs from 'dayjs';
-import { encodeFunctionData, parseUnits } from 'viem';
+import { encodeAbiParameters, parseUnits } from 'viem';
 import { CONFIG } from '../config';
 import { YIELD_MANAGER_ABI, ERC20_ABI } from '../contracts/abis';
 
@@ -44,9 +45,9 @@ class AaveProvider {
             description: "Manages Aave market interactions for yield optimization",
             schema: z.object({
                 action: z.enum(['analyze', 'supply', 'withdraw', 'balance', 'check_position']),
-                marketId: z.string().optional(),
+                token: z.string().optional(),
                 amount: z.string().optional(),
-                shares: z.string().optional()
+                marketId: z.string().optional(),
             }),
             invoke: async (walletProvider, args) => {
                 try {
@@ -56,7 +57,13 @@ class AaveProvider {
                         case 'analyze':
                             return await this.analyzeMarkets();
                         case 'supply':
-                            return await this.handleSupply(userAddress, args, walletProvider);
+                            if (!args.amount || !args.token) {
+                                throw new Error("Supply requires both amount and token parameters");
+                            }
+                            return await this.handleSupply(userAddress, {
+                                amount: args.amount,
+                                token: args.token
+                            }, walletProvider);
                         case 'withdraw':
                             return await this.handleWithdraw(userAddress, args);
                         case 'check_position':
@@ -209,57 +216,95 @@ class AaveProvider {
 
     private async handleSupply(
         userAddress: `0x${string}`,
-        args: { amount?: string; token?: string },
+        args: { amount: string; token: string },
         walletProvider: CdpWalletProvider
-    ): Promise<string> {
+      ): Promise<string> {
         if (!args.amount || !args.token) {
-            throw new Error("Amount and token required");
+          throw new Error("Amount and token required");
         }
-    
+        
         try {
-            const tokens = [args.token as `0x${string}`];
-            const amount = parseUnits(args.amount, 18);
-            const amounts = [amount];
-            const additionalData = ethers.utils.defaultAbiCoder.encode(['uint256'], [0]);
-    
-            // First approve token spend
-            const approveTx = await walletProvider.sendTransaction({
-                to: args.token as `0x${string}`,
-                data: encodeFunctionData({
-                    abi: ERC20_ABI,
-                    functionName: 'approve',
-                    args: [CONFIG.YIELD_MANAGER.address as `0x${string}`, amount]
-                })
+          // --- Step 1: Export wallet data from your wallet provider ---
+          const walletData = await walletProvider.exportWallet();
+          console.log("Exported wallet data:", walletData);
+          
+          // --- Step 2: Import the wallet data into a Coinbase SDK Wallet instance ---
+          const sdkWallet = await Wallet.import(walletData);
+          
+          // Verify that the imported wallet's default address is valid.
+          const sdkAddress = await sdkWallet.getDefaultAddress();
+          console.log("Imported SDK Wallet Address:", sdkAddress.toString());
+          if (sdkAddress.toString() === "0x0000000000000000000000000000000000000000") {
+            throw new Error("Imported wallet address is zero—check your wallet data.");
+          }
+          
+          // --- Step 3: Prepare token parameters ---
+          const tokenSymbol = args.token.toUpperCase();
+          const tokenConfig = CONFIG.TOKENS[tokenSymbol as keyof typeof CONFIG.TOKENS];
+          if (!tokenConfig) {
+            throw new Error(`Token ${tokenSymbol} not found in config`);
+          }
+          const tokenAddress = tokenConfig.address as `0x${string}`;
+          const amountBigInt = parseUnits(args.amount, tokenConfig.decimals);
+          
+          // --- Step 4: Check current allowance ---
+          const currentAllowance: bigint = await readContract({
+            networkId: CONFIG.NETWORK.id, // e.g., "base-mainnet"
+            abi: ERC20_ABI,
+            contractAddress: tokenAddress,
+            method: "allowance",
+            //@ts-ignore
+            args: { owner: walletProvider.getAddress() as `0x${string}`, spender: CONFIG.YIELD_MANAGER.address as `0x${string}` },
+          });
+          console.log("Current allowance:", currentAllowance.toString());
+          
+          // If the current allowance is insufficient, perform the approval transaction.
+          if (currentAllowance < amountBigInt) {
+            console.log("Allowance insufficient. Sending approval transaction.");
+            const approveArgs = {
+              spender: CONFIG.YIELD_MANAGER.address as `0x${string}`,
+              value: amountBigInt.toString(),
+            };
+            const approveInvocation = await sdkWallet.invokeContract({
+              contractAddress: tokenAddress,
+              method: "approve",
+              args: approveArgs,
+              abi: ERC20_ABI,
             });
-            await walletProvider.waitForTransactionReceipt(approveTx);
-    
-            // Execute deposit
-            const depositTx = await walletProvider.sendTransaction({
-                to: CONFIG.YIELD_MANAGER.address as `0x${string}`,
-                data: encodeFunctionData({
-                    abi: YIELD_MANAGER_ABI,
-                    functionName: 'deposit',
-                    args: [
-                        CONFIG.STRATEGIES.AAVE.address as `0x${string}`,
-                        tokens,
-                        amounts,
-                        // @ts-ignore
-                        additionalData,
-                        userAddress
-                    ]
-                })
-            });
-            await walletProvider.waitForTransactionReceipt(depositTx);
-    
-            return JSON.stringify({
-                success: true,
-                approveTxHash: approveTx,
-                depositTxHash: depositTx
-            });
+            await approveInvocation.wait();
+            console.log("Approval confirmed.");
+          } else {
+            console.log("Sufficient allowance available. Skipping approval.");
+          }
+          
+          // --- Step 5: Execute the deposit ---
+          // For AAVE deposits, encode additionalData as abi.encode(uint16(0)) per Foundry tests.
+          const depositAdditionalData = encodeAbiParameters([{ type: "bytes32" }], ["0x0000000000000000000000000000000000000000000000000000000000000000" as `0x${string}`]);
+          const depositArgs = {
+            _strategy: CONFIG.STRATEGIES.AAVE.address as `0x${string}`,
+            _tokens: [tokenAddress],
+            _amounts: [parseUnits(args.amount, tokenConfig.decimals).toString()], // Convert to proper units
+            _additionalData: depositAdditionalData,
+            _for: userAddress,
+          };
+          const depositInvocation = await sdkWallet.invokeContract({
+            contractAddress: CONFIG.YIELD_MANAGER.address as `0x${string}`,
+            method: "deposit",
+            args: depositArgs,
+            abi: YIELD_MANAGER_ABI,
+          });
+          await depositInvocation.wait();
+          console.log("Deposit confirmed.");
+          
+          return JSON.stringify({
+            success: true,
+            message: "Supply (approval and deposit) successful",
+          });
         } catch (error: any) {
-            throw error;
+          console.error("Supply failed:", error);
+          throw error;
         }
-    }
+      }
     private async handleWithdraw(userAddress: string, args: any): Promise<string> {
         // TODO: Implement withdraw logic
         return JSON.stringify({

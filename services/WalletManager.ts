@@ -1,7 +1,7 @@
-// src/services/WalletManager.ts
 import { CdpWalletProvider } from "@coinbase/agentkit";
 import { CONFIG } from "../config";
 import * as fs from "fs";
+
 const WALLET_DATA_FILE = "wallet_data.txt";
 
 export class WalletManager {
@@ -16,7 +16,6 @@ export class WalletManager {
         walletDataStr = fs.readFileSync(WALLET_DATA_FILE, "utf8");
       } catch (error) {
         console.error("Error reading wallet data:", error);
-        // Continue without wallet data
       }
     }
     
@@ -24,7 +23,7 @@ export class WalletManager {
       apiKeyName: process.env.CDP_API_KEY_NAME!,
       apiKeyPrivateKey: process.env.CDP_API_KEY_PRIVATE_KEY!.replace(/\\n/g, "\n"),
       cdpWalletData: walletDataStr || undefined,
-      networkId: CONFIG.NETWORK.id,
+      networkId: CONFIG.NETWORK.id
     });
     
     const address = await this.wallet.getAddress();

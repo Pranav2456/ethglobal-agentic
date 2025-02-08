@@ -66,6 +66,16 @@ export const CONFIG = {
     minimumAPYDifference: 0.5, // 0.5% minimum difference to trigger strategy change
     checkInterval: 60 * 60 * 1000, // 1 hour in milliseconds
   },
+  STRATEGIES: {
+    MORPHO: {
+        address: "0x9bBF97fE8CF3faE8d58915878c9C1eb1892C46F2" as `0x${string}`,
+        protocol: "morpho" as const
+    },
+    AAVE: {
+        address: "0x9C80FE3Abc89d865Fe307707047D3d57414cD395" as `0x${string}`,
+        protocol: "aave" as const
+    }
+},
   TOKENS: {
     USDC: {
       address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",

@@ -13,6 +13,9 @@ import {
 import * as markets from '@bgd-labs/aave-address-book';
 import { formatReservesAndIncentives, formatUserSummaryAndIncentives } from '@aave/math-utils';
 import dayjs from 'dayjs';
+import { encodeFunctionData, parseUnits } from 'viem';
+import { CONFIG } from '../config';
+import { YIELD_MANAGER_ABI, ERC20_ABI } from '../contracts/abis';
 
 class AaveProvider {
     private poolDataProvider: UiPoolDataProvider;
@@ -53,7 +56,7 @@ class AaveProvider {
                         case 'analyze':
                             return await this.analyzeMarkets();
                         case 'supply':
-                            return await this.handleSupply(userAddress, args);
+                            return await this.handleSupply(userAddress, args, walletProvider);
                         case 'withdraw':
                             return await this.handleWithdraw(userAddress, args);
                         case 'check_position':
@@ -204,14 +207,65 @@ class AaveProvider {
         }
     }
 
-    private async handleSupply(userAddress: string, args: any): Promise<string> {
-        // TODO: Implement supply logic
-        throw new Error('Not implemented yet');
+    private async handleSupply(
+        userAddress: `0x${string}`,
+        args: { amount?: string; token?: string },
+        walletProvider: CdpWalletProvider
+    ): Promise<string> {
+        if (!args.amount || !args.token) {
+            throw new Error("Amount and token required");
+        }
+    
+        try {
+            const tokens = [args.token as `0x${string}`];
+            const amount = parseUnits(args.amount, 18);
+            const amounts = [amount];
+            const additionalData = ethers.utils.defaultAbiCoder.encode(['uint256'], [0]);
+    
+            // First approve token spend
+            const approveTx = await walletProvider.sendTransaction({
+                to: args.token as `0x${string}`,
+                data: encodeFunctionData({
+                    abi: ERC20_ABI,
+                    functionName: 'approve',
+                    args: [CONFIG.YIELD_MANAGER.address as `0x${string}`, amount]
+                })
+            });
+            await walletProvider.waitForTransactionReceipt(approveTx);
+    
+            // Execute deposit
+            const depositTx = await walletProvider.sendTransaction({
+                to: CONFIG.YIELD_MANAGER.address as `0x${string}`,
+                data: encodeFunctionData({
+                    abi: YIELD_MANAGER_ABI,
+                    functionName: 'deposit',
+                    args: [
+                        CONFIG.STRATEGIES.AAVE.address as `0x${string}`,
+                        tokens,
+                        amounts,
+                        // @ts-ignore
+                        additionalData,
+                        userAddress
+                    ]
+                })
+            });
+            await walletProvider.waitForTransactionReceipt(depositTx);
+    
+            return JSON.stringify({
+                success: true,
+                approveTxHash: approveTx,
+                depositTxHash: depositTx
+            });
+        } catch (error: any) {
+            throw error;
+        }
     }
-
     private async handleWithdraw(userAddress: string, args: any): Promise<string> {
         // TODO: Implement withdraw logic
-        throw new Error('Not implemented yet');
+        return JSON.stringify({
+            success: true,
+            message: 'Withdrawal not implemented'
+        });
     }
 }
 

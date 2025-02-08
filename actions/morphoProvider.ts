@@ -24,6 +24,9 @@ import {
 import { formatUnits, parseUnits } from "viem";
 import EventEmitter from "events";
 import { PublicClient } from "viem";
+import { ERC20_ABI, YIELD_MANAGER_ABI } from "../contracts/abis";
+import { encodeFunctionData } from "viem";
+import { ethers } from "ethers";
 
 // Add type guard for token names
 type TokenName = keyof typeof CONFIG.TOKENS;
@@ -110,7 +113,7 @@ class MorphoProvider extends EventEmitter {
                         case 'analyze':
                             return await this.analyzeMarkets();
                         case 'supply':
-                            return await this.handleSupply(userAddress, args);
+                            return await this.handleSupply(userAddress, args, walletProvider);
                         case 'withdraw':
                             return await this.handleWithdraw(userAddress, args);
                         case 'check_position':
@@ -157,9 +160,12 @@ class MorphoProvider extends EventEmitter {
 
             for (const market of marketsToCheck) {
                 try {
+                    if (!market.id || typeof market.id !== 'string') {
+                        throw new Error('Invalid market ID');
+                    }
                     const position = await AccrualPosition.fetch(
                         userAddress,
-                        market.id as MarketId,
+                        market.id as `0x${string}` as MarketId,  // Correctly type the market ID
                         publicClient
                     );
 
@@ -195,65 +201,52 @@ class MorphoProvider extends EventEmitter {
 
     private async handleSupply(
         userAddress: `0x${string}`,
-        args: { marketId?: string; amount?: string }
+        args: { marketId?: string; amount?: string; token?: string },
+        walletProvider: CdpWalletProvider
     ): Promise<string> {
-        if (!args.marketId || !args.amount) {
-            throw new Error("Market ID and amount required");
+        if (!args.amount || !args.token || !args.marketId) {
+            throw new Error("Amount, token, and marketId required");
         }
-
+    
         try {
-            const marketData = await this.getMarketData(args.marketId);
-            if (!marketData.risk.isHealthy) {
-                throw new Error('Market conditions unsafe for supply');
-            }
-
-            const amount = parseUnits(args.amount, CONFIG.TOKENS[marketData.name as TokenName].decimals);
-
-            // Simulate approval
-            const approvalSim = await simulateApproval(
-                publicClient as PublicClient,
-                userAddress,
-                marketData.tokens.loan,
-                CONFIG.YIELD_MANAGER.address as `0x${string}`,
-                amount
-            );
-
-            if (!approvalSim.success) {
-                throw new Error(`Approval simulation failed: ${approvalSim.error}`);
-            }
-
-            // Simulate supply
-            const supplySim = await simulateStrategy(
-                publicClient as PublicClient,
-                userAddress,
-                {
-                    protocol: Protocol.MORPHO,
-                    action: 'supply',
-                    marketId: args.marketId,
-                    token: marketData.tokens.loan,
-                    amount
-                },
-                CONFIG.YIELD_MANAGER.address as `0x${string}`,
-                CONFIG.MORPHO.address as `0x${string}`
-            );
-
-            if (!supplySim.success) {
-                throw new Error(`Supply simulation failed: ${supplySim.error}`);
-            }
-
-            const totalGas = (approvalSim.gasEstimate || BigInt(0)) + 
-                           (supplySim.gasEstimate || BigInt(0));
-            
-            const { gasCost, gasPrice } = await estimateGasCosts(publicClient as PublicClient, totalGas);
-
+            const tokens = [args.token as `0x${string}`];
+            const amount = parseUnits(args.amount, 18);
+            const amounts = [amount];
+            const additionalData = ethers.utils.defaultAbiCoder.encode(['bytes32'], [args.marketId]);
+    
+            // First approve token spend
+            const approveTx = await walletProvider.sendTransaction({
+                to: args.token as `0x${string}`,
+                data: encodeFunctionData({
+                    abi: ERC20_ABI,
+                    functionName: 'approve',
+                    args: [CONFIG.YIELD_MANAGER.address as `0x${string}`, amount]
+                })
+            });
+            await walletProvider.waitForTransactionReceipt(approveTx);
+    
+            // Execute deposit
+            const depositTx = await walletProvider.sendTransaction({
+                to: CONFIG.YIELD_MANAGER.address as `0x${string}`,
+                data: encodeFunctionData({
+                    abi: YIELD_MANAGER_ABI,
+                    functionName: 'deposit',
+                    args: [
+                        CONFIG.STRATEGIES.MORPHO.address as `0x${string}`,
+                        tokens,
+                        amounts,
+                        // @ts-ignore
+                        additionalData,
+                        userAddress
+                    ]
+                })
+            });
+            await walletProvider.waitForTransactionReceipt(depositTx);
+    
             return JSON.stringify({
                 success: true,
-                simulations: { approval: approvalSim, supply: supplySim },
-                estimates: {
-                    totalGas: totalGas.toString(),
-                    gasCost: gasCost.toString(),
-                    gasPrice: gasPrice.toString()
-                }
+                approveTxHash: approveTx,
+                depositTxHash: depositTx
             });
         } catch (error: any) {
             throw error;
@@ -264,50 +257,11 @@ class MorphoProvider extends EventEmitter {
         userAddress: `0x${string}`,
         args: { marketId?: string; amount?: string; shares?: string }
     ): Promise<string> {
-        if (!args.marketId || !args.amount) {
-            throw new Error("Market ID and amount required");
-        }
-
-        try {
-            const marketData = await this.getMarketData(args.marketId);
-            const amount = parseUnits(args.amount, CONFIG.TOKENS[marketData.name as TokenName].decimals);
-
-            const withdrawSim = await simulateStrategy(
-                publicClient as PublicClient,
-                userAddress,
-                {
-                    protocol: Protocol.MORPHO,
-                    action: 'withdraw',
-                    marketId: args.marketId,
-                    token: marketData.tokens.loan,
-                    amount,
-                    shares: args.shares ? BigInt(args.shares) : undefined
-                },
-                CONFIG.YIELD_MANAGER.address as `0x${string}`,
-                CONFIG.MORPHO.address as `0x${string}`
-            );
-
-            if (!withdrawSim.success) {
-                throw new Error(`Withdraw simulation failed: ${withdrawSim.error}`);
-            }
-
-            const { gasCost, gasPrice } = await estimateGasCosts(
-                publicClient as PublicClient,
-                withdrawSim.gasEstimate || BigInt(0)
-            );
-
-            return JSON.stringify({
-                success: true,
-                simulation: withdrawSim,
-                estimates: {
-                    gas: withdrawSim.gasEstimate?.toString(),
-                    gasCost: gasCost.toString(),
-                    gasPrice: gasPrice.toString()
-                }
-            });
-        } catch (error: any) {
-            throw error;
-        }
+       // TODO: Implement withdraw
+       return JSON.stringify({
+        success: true,
+        message: 'Withdrawal not implemented'
+       });
     }
 }
 

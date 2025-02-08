@@ -47,7 +47,7 @@ export class AutonomousAgent extends EventEmitter {
   async initialize() {
     try {
       const llm = new ChatOpenAI({
-        modelName: "gpt-4-turbo-preview",
+        modelName: "gpt-4o-mini",
         temperature: 0.7,
       });
 

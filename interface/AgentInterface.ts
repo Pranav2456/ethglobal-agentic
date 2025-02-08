@@ -1,4 +1,3 @@
-// src/interface/AgentInterface.ts
 import { AutonomousAgent } from '../AutonomousAgent';
 import { EventEmitter } from 'events';
 import readline from 'readline';

@@ -1,4 +1,3 @@
-// src/agent.ts
 import { AutonomousAgent } from './AutonomousAgent';
 import { AgentInterface } from './interface/AgentInterface';
 import * as dotenv from 'dotenv';

@@ -53,6 +53,14 @@ YieldMax.AI revolutionizes DeFi yield optimization by combining artificial intel
 ### Live Demo
 https://yieldmax-ai.vercel.app/
 
+### Contract Addresses
+YieldStrategyManager: https://basescan.org/address/0x90Cae48cEC3595Cd1A6a9D806679EEE50F364979
+MorphoBaseStrategy: https://basescan.org/address/0x9bBF97fE8CF3faE8d58915878c9C1eb1892C46F2
+AaveBaseStrategy: https://basescan.org/address/0x9C80FE3Abc89d865Fe307707047D3d57414cD395
+
+### Autonome Deployment
+https://autonome.alt.technology/yieldmax-yilblw
+
 ### Local Setup
 ```bash
 # Clone the repository

@@ -7,13 +7,6 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { ArrowLeft, Send, Trash2 } from "lucide-react";
 import Link from "next/link";
 
-// API configuration
-const API_URL = `https://api.allorigins.win/raw?url=${encodeURIComponent(process.env.NEXT_PUBLIC_API_URL || '')}`
-const API_HEADERS = {
-  'Authorization': process.env.NEXT_PUBLIC_API_AUTH || '',
-  'Content-Type': 'application/json'
-};
-
 interface Message {
   role: "assistant" | "user";
   content: string;
@@ -43,9 +36,8 @@ export default function AppPage() {
   useEffect(() => {
     const checkHeartbeat = async () => {
         try {
-            await fetch(`${API_URL}/heartbeat`, {
-              method: "GET",
-              headers: API_HEADERS
+            await fetch('/api/agent', {
+                method: 'GET'
             });
         } catch (error) {
             console.error('Heartbeat error:', error);
@@ -57,43 +49,47 @@ export default function AppPage() {
     return () => clearInterval(interval);
 }, []);
 
-  const handleSend = async () => {
-    if (input.trim() && !isLoading) {
-      try {
-        setIsLoading(true);
-        const userMessage: Message = { role: "user", content: input };
-        setMessages(prev => [...prev, userMessage]);
-        setInput("");
+const handleSend = async () => {
+  if (input.trim() && !isLoading) {
+    try {
+      setIsLoading(true);
+      const userMessage: Message = { role: "user", content: input };
+      setMessages(prev => [...prev, userMessage]);
+      setInput("");
 
-        const response = await fetch(`${API_URL}/message`, {
-          method: 'POST',
-          headers: API_HEADERS,
-          body: JSON.stringify({ message: input }),
-        });
+      const response = await fetch('/api/agent', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ message: input }),
+      });
 
-        if (!response.ok) {
-          throw new Error('Failed to get response from agent');
-        }
-
-        const data = await response.json();
-        
-        setMessages(prev => [...prev, {
-          role: "assistant",
-          content: data.text,
-        }]);
-
-      } catch (error) {
-        console.error('Error:', error);
-        setMessages(prev => [...prev, {
-          role: "assistant",
-          content: "Sorry, I encountered an error. Please try again.",
-          error: true
-        }]);
-      } finally {
-        setIsLoading(false);
+      if (!response.ok) {
+        throw new Error('Failed to get response from agent');
       }
+
+      const data = await response.json();
+      
+      setMessages(prev => [...prev, {
+        role: "assistant",
+        content: data.text,
+      }]);
+
+    } catch (error) {
+      console.error('Error:', error);
+      setMessages(prev => [...prev, {
+        role: "assistant",
+        content: "Sorry, I encountered an error. Please try again.",
+        error: true
+      }]);
+    } finally {
+      setIsLoading(false);
     }
-  };
+  }
+};
+
+
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {

@@ -51,7 +51,7 @@ YieldMax.AI revolutionizes DeFi yield optimization by combining artificial intel
 ## 🚀 Try It Out
 
 ### Live Demo
-[Link to demo]
+https://yieldmax-ai.vercel.app/
 
 ### Local Setup
 ```bash

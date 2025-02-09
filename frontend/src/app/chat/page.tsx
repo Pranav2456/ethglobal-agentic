@@ -36,7 +36,7 @@ export default function AppPage() {
   useEffect(() => {
     const checkHeartbeat = async () => {
         try {
-            await fetch('/api/agent', {
+            await fetch('/api/agent/heartbeat', {
                 method: 'GET'
             });
         } catch (error) {

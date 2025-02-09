@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 
-const API_URL = process.env.API_URL || 'https://autonome.alt.technology/yieldmax-rgamik';
-const API_KEY = process.env.API_KEY || 'Basic eWllbGRtYXg6SVFTb1JabU16Sg==';
+const API_URL = 'https://autonome.alt.technology/yieldmax-rgamik';
+const API_KEY = 'eWllbGRtYXg6aGZhd0h4b3dBdA==';
 
 export async function POST(req: Request) {
   try {
@@ -15,6 +15,10 @@ export async function POST(req: Request) {
       },
       body: JSON.stringify(body),
     });
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
 
     const data = await response.json();
     return NextResponse.json(data);
@@ -36,6 +40,10 @@ export async function GET() {
             }
         });
         
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
         const data = await response.json();
         return NextResponse.json(data);
     } catch (error) {
@@ -45,4 +53,4 @@ export async function GET() {
             { status: 500 }
         );
     }
-}
+} 

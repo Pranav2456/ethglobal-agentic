@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 
-const API_URL = 'https://autonome.alt.technology/yieldmax-rgamik';
-const API_KEY = 'eWllbGRtYXg6aGZhd0h4b3dBdA==';
+const API_URL = 'https://autonome.alt.technology/yieldmax-yilblw';
+const API_KEY = 'eWllbGRtYXg6YUViZ1VmbWhWYQ==';
 
 export async function POST(req: Request) {
   try {

@@ -43,7 +43,10 @@ export default function AppPage() {
   useEffect(() => {
     const checkHeartbeat = async () => {
         try {
-            await fetch(`${API_URL}/heartbeat`);
+            await fetch(`${API_URL}/heartbeat`, {
+              method: "GET",
+              headers: API_HEADERS
+            });
         } catch (error) {
             console.error('Heartbeat error:', error);
         }

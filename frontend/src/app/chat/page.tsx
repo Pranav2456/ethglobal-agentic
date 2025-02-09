@@ -40,6 +40,20 @@ export default function AppPage() {
     scrollToBottom();
   }, [messages]);
 
+  useEffect(() => {
+    const checkHeartbeat = async () => {
+        try {
+            await fetch(`${API_URL}/heartbeat`);
+        } catch (error) {
+            console.error('Heartbeat error:', error);
+        }
+    };
+
+    // Check every 4 minutes
+    const interval = setInterval(checkHeartbeat, 4 * 60 * 1000);
+    return () => clearInterval(interval);
+}, []);
+
   const handleSend = async () => {
     if (input.trim() && !isLoading) {
       try {

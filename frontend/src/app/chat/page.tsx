@@ -8,9 +8,9 @@ import { ArrowLeft, Send, Trash2 } from "lucide-react";
 import Link from "next/link";
 
 // API configuration
-const API_URL = "https://autonome.alt.technology/yieldmax-tlxdlx";
+const API_URL = process.env.NEXT_PUBLIC_API_URL;
 const API_HEADERS = {
-  'Authorization': 'Basic eWllbGRtYXg6SVFTb1JabU16Sg==',
+  'Authorization': process.env.NEXT_PUBLIC_API_AUTH || '',
   'Content-Type': 'application/json'
 };
 

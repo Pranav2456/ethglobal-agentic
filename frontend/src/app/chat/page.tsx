@@ -8,7 +8,7 @@ import { ArrowLeft, Send, Trash2 } from "lucide-react";
 import Link from "next/link";
 
 // API configuration
-const API_URL = process.env.NEXT_PUBLIC_API_URL;
+const API_URL = `https://api.allorigins.win/raw?url=${encodeURIComponent(process.env.NEXT_PUBLIC_API_URL || '')}`
 const API_HEADERS = {
   'Authorization': process.env.NEXT_PUBLIC_API_AUTH || '',
   'Content-Type': 'application/json'

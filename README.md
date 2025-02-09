@@ -1,148 +1,69 @@
-# 🤖 DeFi Yield Maximizer Agent
+# 🤖 YieldMax.AI - Intelligent DeFi Yield Optimizer
 
-A powerful, autonomous agent that helps users optimize their DeFi yields while maintaining safety and risk management on Base.
+Your AI-powered companion for maximizing DeFi yields on Base, built during ETHGlobal BaseHackathon 2024.
 
-## 🌟 Features
+## 🎯 Project Overview
 
-### Intelligent Portfolio Management
-- Automated yield optimization across multiple DeFi protocols
-- Real-time market analysis and opportunity detection
-- Risk-aware position management
-- Gas-optimized rebalancing strategies
+YieldMax.AI revolutionizes DeFi yield optimization by combining artificial intelligence with blockchain technology. Our autonomous agent analyzes market conditions, identifies opportunities, and executes optimal strategies while maintaining rigorous risk management.
 
-### Smart Wallet Integration
-- Seamless CDP wallet integration
-- Secure transaction handling
-- Multi-protocol support
-- Automated position monitoring
+## 🌟 Key Features
 
-### Risk Management
-- Real-time health factor monitoring
-- Utilization rate tracking
-- Automatic risk assessment
-- Protocol-specific safety checks
+### 🧠 Intelligent Market Analysis
+* Real-time protocol comparison (Aave & Morpho)
+* Advanced risk assessment
+* APY and liquidity tracking
+* Gas-cost optimization
 
-### Yield Optimization
-- APY comparison across protocols
-- Gas-cost aware rebalancing
-- Profitability calculations
-- Automated execution of optimal strategies
+### 🔄 Automated Strategy Execution
+* Smart rebalancing across protocols
+* Risk-aware position management
+* Gas-optimized transactions
+* Health factor monitoring
 
-## 🚀 Getting Started
+### 💬 Natural Language Interface
+* Chat with your AI financial advisor
+* Plain English commands for complex DeFi operations
+* Real-time market insights
+* Educational explanations
 
-### Prerequisites
-- Node.js v18+
-- TypeScript 5.0+
-- An Ethereum node or RPC provider
-- API keys for supported protocols
+## 🛠️ Technology Stack
 
-### Installation
+### Base
+* Primary deployment infrastructure
+* Low-cost, high-speed transactions
+* Optimal DeFi protocol environment
+
+### Coinbase Developer Platform (CDP)
+* Secure wallet infrastructure
+* Blockchain interaction SDK
+* Transaction management
+
+### AgentKit
+* AI agent framework
+* Blockchain interaction tools
+* Intelligent decision-making
+
+### Autonome
+* Agent deployment platform
+* Reliable API infrastructure
+* Secure hosting environment
+
+## 🚀 Try It Out
+
+### Live Demo
+[Link to demo]
+
+### Local Setup
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/defi-yield-maximizer.git
+git clone https://github.com/Pranav2456/yieldmax-ai
 
 # Install dependencies
-cd defi-yield-maximizer
+cd frontend
 npm install
 
 # Set up environment variables
 cp .env.example .env
-# Edit .env with your configuration
-```
 
-### Configuration
-Create a `.env` file with the following:
-```env
-CDP_API_KEY_NAME=your_key_name
-CDP_API_KEY_PRIVATE_KEY=your_private_key
-OPENAI_API_KEY=your_openai_key
-BASE_MAINNET_RPC_URL=your_rpc_url
-```
-
-### Running the Agent
-```bash
-# Start in development mode
+# Start the application
 npm run dev
-
-# Build and start in production
-npm run build
-npm start
-```
-
-## 📚 Documentation
-
-### Core Components
-
-#### Autonomous Agent
-The central component that coordinates all operations:
-- Market analysis
-- Position management
-- Risk assessment
-- Yield optimization
-
-#### Wallet Manager
-Handles all wallet-related operations:
-- Wallet creation
-- Balance monitoring
-- Transaction management
-- Security controls
-
-#### Protocol Integrations
-Manages interactions with various DeFi protocols:
-- Protocol-specific implementations
-- Safety checks
-- Transaction optimization
-- Position tracking
-
-#### Yield Optimizer
-Implements yield optimization strategies:
-- Cross-protocol APY comparison
-- Gas cost analysis
-- Profitability calculations
-- Rebalancing execution
-
-## 🔧 Architecture
-
-```
-├── src/
-│   ├── AutonomousAgent.ts     # Main agent logic
-│   ├── actions/               # Protocol-specific actions
-│   ├── services/              # Core services
-│   ├── types/                 # TypeScript types
-│   └── utils/                 # Utility functions
-```
-
-## 🛡️ Security
-
-- All transactions are simulated before execution
-- Health factor monitoring
-- Risk-based position limits
-- Secure wallet management
-- Protocol safety checks
-
-## 🤝 Contributing
-
-We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
-
-1. Fork the repository
-2. Create a feature branch
-3. Commit your changes
-4. Push to the branch
-5. Open a Pull Request
-
-## 📜 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## ⚠️ Disclaimer
-
-This software is for educational purposes only. No financial advice is provided. Always do your own research and understand the risks involved in DeFi investments.
-
-## 🙋‍♂️ Support
-
-- Create an issue for bug reports
-- Join our [Discord](discord-link) for discussions
-- Check out our [Documentation](docs-link) for more details
-
----
-Built with ❤️ by DeFi Enthusiasts

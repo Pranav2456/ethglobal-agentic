@@ -4,27 +4,15 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { ArrowLeft, Send, Wallet } from "lucide-react";
+import { ArrowLeft, Send } from "lucide-react";
 import Link from "next/link";
-import { 
-  ConnectWallet, 
-  Wallet as WalletComponent, 
-  WalletDropdown, 
-  WalletDropdownDisconnect 
-} from '@coinbase/onchainkit/wallet';
-import { 
-  Address, 
-  Avatar, 
-  Name, 
-  Identity 
-} from '@coinbase/onchainkit/identity';
-import { useAccount } from 'wagmi';
-import { parseUnits } from "viem";
-import { useSendTransaction } from 'wagmi';
-import { color } from '@coinbase/onchainkit/theme';
 
-// Define API URL - You can set this in your .env.local
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+// API configuration
+const API_URL = "https://autonome.alt.technology/yieldmax-tlxdlx";
+const API_HEADERS = {
+  'Authorization': 'Basic eWllbGRtYXg6SVFTb1JabU16Sg==',
+  'Content-Type': 'application/json'
+};
 
 interface Message {
   role: "assistant" | "user";
@@ -40,66 +28,18 @@ export default function AppPage() {
   ]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [fundAmount, setFundAmount] = useState("");
-
-  const { address } = useAccount();
-  const { sendTransaction } = useSendTransaction();
-
-  const getAgentWallet = async () => {
-    try {
-      const response = await fetch(`${API_URL}/agent-address`);
-      if (!response.ok) throw new Error('Failed to get agent address');
-      const data = await response.json();
-      return data.address as `0x${string}`;
-    } catch (error) {
-      console.error('Error getting agent address:', error);
-      throw error;
-    }
-  };
-
-  const handleFund = async () => {
-    try {
-      if (!address) {
-        alert("Please connect your wallet first");
-        return;
-      }
-
-      const agentAddress = await getAgentWallet();
-      const amount = parseUnits(fundAmount, 18);
-
-      const hash = await sendTransaction({
-        to: agentAddress,
-        value: amount,
-      });
-
-      setMessages(prev => [...prev, {
-        role: "assistant",
-        content: `Transaction sent! Hash: ${hash}\nThank you for funding the agent with ${fundAmount} ETH!`
-      }]);
-
-      setFundAmount("");
-    } catch (error) {
-      console.error('Funding error:', error);
-      setMessages(prev => [...prev, {
-        role: "assistant",
-        content: "Sorry, there was an error processing your transaction."
-      }]);
-    }
-  };
 
   const handleSend = async () => {
     if (input.trim() && !isLoading) {
       try {
         setIsLoading(true);
-        const userMessage: Message = { role: "user" as const, content: input };
+        const userMessage: Message = { role: "user", content: input };
         setMessages(prev => [...prev, userMessage]);
         setInput("");
 
         const response = await fetch(`${API_URL}/message`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
+          headers: API_HEADERS,
           body: JSON.stringify({ message: input }),
         });
 
@@ -144,39 +84,10 @@ export default function AppPage() {
         </Link>
         <nav>
           <div className="mb-4 p-4 bg-indigo-50 rounded-lg">
-            <h3 className="text-sm font-semibold mb-2">Fund Agent Wallet</h3>
-            <WalletComponent>
-              <ConnectWallet>
-                <Avatar className="h-6 w-6" />
-                <Name />
-              </ConnectWallet>
-              <WalletDropdown>
-                <Identity className="px-4 pt-3 pb-2" hasCopyAddressOnClick>
-                  <Avatar />
-                  <Name />
-                  <Address className={color.foregroundMuted} />
-                </Identity>
-                <WalletDropdownDisconnect />
-              </WalletDropdown>
-            </WalletComponent>
-            {address && (
-              <div className="mt-2">
-                <Input
-                  type="number"
-                  placeholder="Amount in ETH"
-                  value={fundAmount}
-                  onChange={(e) => setFundAmount(e.target.value)}
-                  className="mb-2"
-                />
-                <Button 
-                  onClick={handleFund}
-                  className="w-full bg-indigo-600 hover:bg-indigo-700 text-white"
-                >
-                  <Wallet className="mr-2 h-4 w-4" />
-                  Fund Agent
-                </Button>
-              </div>
-            )}
+            <h3 className="text-sm font-semibold mb-2">AI Yield Assistant</h3>
+            <p className="text-sm text-gray-600">
+              Ask me about market analysis, lending strategies, and yield optimization.
+            </p>
           </div>
         </nav>
       </aside>

@@ -8,8 +8,9 @@ COPY package*.json ./
 # Install dependencies
 RUN npm install
 
-# Copy source code
-COPY . .
+# Copy source code excluding frontend
+COPY . ./
+RUN rm -rf /app/frontend
 
 # Build TypeScript
 RUN npm run build
@@ -18,4 +19,4 @@ RUN npm run build
 EXPOSE 3000
 
 # Start server
-CMD ["npm", "start"] 
+CMD ["npm", "start"]

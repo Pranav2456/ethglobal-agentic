@@ -304,11 +304,13 @@ class MorphoProvider extends EventEmitter {
             abi: YIELD_MANAGER_ABI,
           });
           await depositInvocation.wait();
+          // get the tx hash
+          const txHash = depositInvocation.getTransactionHash();
           console.log("Deposit confirmed.");
           
           return JSON.stringify({
             success: true,
-            message: "Supply (approval and deposit) successful",
+            message: `Supply (approval and deposit) successful - ${txHash}`,
           });
         } catch (error: any) {
           console.error("Supply failed:", error);

@@ -1,6 +1,6 @@
 # 🤖 YieldMax.AI - Intelligent DeFi Yield Optimizer
 
-Your AI-powered companion for maximizing DeFi yields on Base, built during ETHGlobal BaseHackathon 2024.
+Your AI-powered companion for maximizing DeFi yields on Base, built during ETHGlobal Agentic Hackathon 2025.
 
 ## 🎯 Project Overview
 

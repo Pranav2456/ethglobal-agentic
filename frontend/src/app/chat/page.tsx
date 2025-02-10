@@ -54,7 +54,11 @@ const handleSend = async () => {
     try {
       setIsLoading(true);
       const userMessage: Message = { role: "user", content: input };
-      setMessages(prev => [...prev, userMessage]);
+      setMessages(prev => [...prev, userMessage, {
+        role: "assistant",
+        content: "Analyzing your request... This might take a moment for complex queries.",
+        loading: true
+      }]);
       setInput("");
 
       const response = await fetch('/api/agent', {
@@ -71,14 +75,15 @@ const handleSend = async () => {
 
       const data = await response.json();
       
-      setMessages(prev => [...prev, {
+      // Remove loading message and add actual response
+      setMessages(prev => [...prev.filter(msg => !msg.loading), {
         role: "assistant",
         content: data.text,
       }]);
 
     } catch (error) {
       console.error('Error:', error);
-      setMessages(prev => [...prev, {
+      setMessages(prev => [...prev.filter(msg => !msg.loading), {
         role: "assistant",
         content: "Sorry, I encountered an error. Please try again.",
         error: true

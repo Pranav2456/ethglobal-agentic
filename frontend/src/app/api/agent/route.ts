@@ -3,6 +3,9 @@ import { NextResponse } from 'next/server';
 const API_URL = 'https://autonome.alt.technology/yieldmax-yilblw';
 const API_KEY = 'eWllbGRtYXg6YUViZ1VmbWhWYQ==';
 
+export const maxDuration = 600;
+export const dynamic = 'force-dynamic';
+
 export async function POST(req: Request) {
   try {
     const body = await req.json();
@@ -14,10 +17,11 @@ export async function POST(req: Request) {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(body),
+      cache: 'no-store',
     });
 
     if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
+      throw new Error(`API responded with status: ${response.status}`);
     }
 
     const data = await response.json();

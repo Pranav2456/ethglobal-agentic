@@ -3,7 +3,7 @@ import { NextResponse } from 'next/server';
 const API_URL = 'https://autonome.alt.technology/yieldmax-yilblw';
 const API_KEY = 'eWllbGRtYXg6YUViZ1VmbWhWYQ==';
 
-export const maxDuration = 600;
+export const maxDuration = 60
 export const dynamic = 'force-dynamic';
 
 export async function POST(req: Request) {

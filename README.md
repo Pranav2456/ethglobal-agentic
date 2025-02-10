@@ -53,6 +53,32 @@ YieldMax.AI revolutionizes DeFi yield optimization by combining artificial intel
 ### Live Demo
 https://yieldmax-ai.vercel.app/
 
+## ⚠️ Important Note on Query Processing
+
+### Deployment Constraints
+The frontend is deployed on Vercel's Hobby (free) plan, which enforces a 60-second timeout limit on API routes. While our AI agent is capable of processing complex DeFi analysis queries successfully, the hosting platform automatically terminates requests exceeding this duration.
+
+### Types of Affected Queries
+Complex operations that might exceed the timeout include:
+- Multi-protocol market analysis
+- Comprehensive yield comparisons
+- Detailed risk assessments across protocols
+- Advanced portfolio optimization calculations
+
+### Recommended Usage
+For optimal experience:
+- Break down complex analyses into smaller queries
+- Use focused, specific questions for quick market checks
+- Allow brief intervals between complex operations
+
+### Solution for Production
+For production environments requiring comprehensive market analysis:
+- Upgrade to Vercel Pro plan for extended timeouts
+- Consider self-hosting the API for custom timeout configurations
+- Implement request chunking for complex operations
+
+*Note: This limitation is purely hosting-related and does not affect the agent's analytical capabilities or accuracy of responses.*
+
 ### Contract Addresses
 YieldStrategyManager: https://basescan.org/address/0x90Cae48cEC3595Cd1A6a9D806679EEE50F364979
 MorphoBaseStrategy: https://basescan.org/address/0x9bBF97fE8CF3faE8d58915878c9C1eb1892C46F2

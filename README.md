@@ -74,7 +74,7 @@ For optimal experience:
 ### Solution for Production
 For production environments requiring comprehensive market analysis:
 - Upgrade to Vercel Pro plan for extended timeouts
-- Consider self-hosting the API for custom timeout configurations
+- Consider self-hosting the API for cusgittom timeout configurations
 - Implement request chunking for complex operations
 
 *Note: This limitation is purely hosting-related and does not affect the agent's analytical capabilities or accuracy of responses.*
